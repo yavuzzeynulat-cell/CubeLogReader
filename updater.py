@@ -27,8 +27,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 # === CONFIG: change OWNER/REPO once the GitHub repo is created ===
-GITHUB_OWNER = "OWNER"
-GITHUB_REPO = "REPO"
+GITHUB_OWNER = "yavuzzeynulat-cell"
+GITHUB_REPO = "CubeLogReader"
 RELEASE_API = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
 ASSET_NAME = "src.zip"
 
