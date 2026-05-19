@@ -11,7 +11,7 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['main.py'],
+    ['launcher.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,
@@ -19,7 +19,8 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # Exclude updatable application modules - they live in src/, not in the exe
+    excludes=['main', 'reader', 'writer', 'updater'],
     noarchive=False,
     optimize=0,
 )
