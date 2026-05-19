@@ -18,9 +18,12 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import time
+import traceback
 import urllib.request
 import zipfile
 from dataclasses import dataclass
@@ -181,30 +184,106 @@ def _safe_remove(path: str) -> None:
             pass
 
 
-def apply_update(zip_path: str) -> None:
-    """Replace src/ with the contents of zip_path. Move old src/ -> src_backup/.
+def _force_writable(path: str) -> None:
+    """Clear the read-only attribute so a file can be deleted/overwritten."""
+    try:
+        os.chmod(path, stat.S_IWRITE)
+    except OSError:
+        pass
 
-    Raises OSError if extraction fails (after attempting to restore the backup).
+
+def _rmtree_onerror(func, path, _exc) -> None:
+    """rmtree error handler: clear the read-only bit and retry the op once."""
+    _force_writable(path)
+    try:
+        func(path)
+    except OSError:
+        pass
+
+
+def _robust_rmtree(path: str, attempts: int = 5) -> None:
+    """Delete a directory tree, tolerating read-only files and transient
+    antivirus locks. Raises OSError if it still exists after every attempt."""
+    for _ in range(attempts):
+        if not os.path.isdir(path):
+            return
+        shutil.rmtree(path, onerror=_rmtree_onerror)
+        if not os.path.isdir(path):
+            return
+        time.sleep(0.4)
+    if os.path.isdir(path):
+        raise OSError(f"Could not delete folder (locked?): {path}")
+
+
+def _robust_rename(src: str, dst: str, attempts: int = 5) -> None:
+    """os.rename with retries - antivirus often briefly locks fresh files."""
+    last_err: Optional[OSError] = None
+    for _ in range(attempts):
+        try:
+            os.rename(src, dst)
+            return
+        except OSError as e:
+            last_err = e
+            time.sleep(0.4)
+    raise last_err if last_err else OSError(f"rename failed: {src} -> {dst}")
+
+
+def _log_update_error() -> str:
+    """Append the current traceback to update_error.log next to the exe.
+
+    Returns the log path. Best-effort - never raises.
+    """
+    log_path = os.path.join(_app_dir(), "update_error.log")
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write("=== update failed ===\n")
+            f.write(traceback.format_exc())
+            f.write("\n")
+    except OSError:
+        pass
+    return log_path
+
+
+def apply_update(zip_path: str) -> None:
+    """Replace src/ with the contents of zip_path; keep the old src/ as
+    src_backup/ for the launcher's rollback safety net.
+
+    Hardened for Windows: extracts into a staging folder first (so a locked
+    or failed extract never damages the running src/), then performs only
+    fast directory renames. Tolerates read-only files and transient antivirus
+    locks. Raises OSError if it ultimately fails, after restoring src/.
     """
     app_dir = _app_dir()
     src = os.path.join(app_dir, "src")
     backup = os.path.join(app_dir, "src_backup")
+    staging = os.path.join(app_dir, "src_new")
 
-    if os.path.isdir(backup):
-        shutil.rmtree(backup)
-
-    if os.path.isdir(src):
-        os.rename(src, backup)
-
-    os.makedirs(src, exist_ok=True)
+    # 1. Extract into a fresh staging folder. If this fails, src/ is untouched.
+    _robust_rmtree(staging)
+    os.makedirs(staging, exist_ok=True)
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(src)
+            zf.extractall(staging)
     except Exception:
+        _robust_rmtree(staging)
+        raise
+
+    # 2. Drop the previous backup, then swap: src -> backup, staging -> src.
+    try:
+        _robust_rmtree(backup)
         if os.path.isdir(src):
-            shutil.rmtree(src, ignore_errors=True)
-        if os.path.isdir(backup):
-            os.rename(backup, src)
+            _robust_rename(src, backup)
+    except OSError:
+        _robust_rmtree(staging)
+        raise
+
+    try:
+        _robust_rename(staging, src)
+    except OSError:
+        # Swap failed mid-way: put the old src/ back so the app still runs.
+        if not os.path.isdir(src) and os.path.isdir(backup):
+            _robust_rename(backup, src)
+        _robust_rmtree(staging)
         raise
 
 
@@ -228,8 +307,8 @@ def run_update_flow(info: "UpdateInfo", parent_window=None) -> bool:
     tmp_zip = os.path.join(tempfile.gettempdir(), "CubeLogReader_update.zip")
     if not download_update(info, tmp_zip):
         messagebox.showerror(
-            "Guncelleme basarisiz",
-            "Indirme veya dogrulama basarisiz oldu. Internet baglantini kontrol et.",
+            "Update failed",
+            "Download or verification failed. Check your internet connection.",
             parent=parent_window,
         )
         return False
@@ -237,9 +316,12 @@ def run_update_flow(info: "UpdateInfo", parent_window=None) -> bool:
     try:
         apply_update(tmp_zip)
     except Exception as e:
+        log_path = _log_update_error()
         messagebox.showerror(
-            "Guncelleme basarisiz",
-            f"Dosyalar yazilamadi: {e}\nEski surum korundu.",
+            "Update failed",
+            f"Could not write files: {e}\n\n"
+            f"Details saved to:\n{log_path}\n\n"
+            "Previous version kept.",
             parent=parent_window,
         )
         return False
@@ -247,8 +329,8 @@ def run_update_flow(info: "UpdateInfo", parent_window=None) -> bool:
         _safe_remove(tmp_zip)
 
     messagebox.showinfo(
-        "Guncelleme tamam",
-        f"Surum {info.version} yuklendi. Uygulama yeniden baslatilacak.",
+        "Update complete",
+        f"Version {info.version} installed. The app will now restart.",
         parent=parent_window,
     )
     restart_app()

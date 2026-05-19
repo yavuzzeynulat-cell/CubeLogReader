@@ -65,14 +65,23 @@ COLUMNS (left to right):
 14. Load (kN) — decimal number, e.g. 1102.34, 1196.46
 15. Compressive Strength (N/mm²) — decimal number, e.g. 48.99
 
-SHOTCRETE (sprayed concrete) FORM — occasional special case:
-- Header reads "Shotcrete Compressive Strength Test Form".
+SHOTCRETE / CORE FORM — occasional special case:
+- This is a SEPARATE printed form titled "Core Record and Core
+  Compressive Strength Test Forms" — note the word "Core". The normal
+  cube form is titled "Concrete Sampling Log and Cube Compressive
+  Strength Test Forms" — note the word "Cube". Both forms share the
+  same form code (e.g. "T/02 - BEJV - MS - MKC - EN - 12390-3"); the
+  ONLY reliable difference is "Core" vs "Cube" in the printed title.
 - 5 rows per age instead of 3 (so 10 per set; 20 if two-set).
 - Column 3 "Mould No" is replaced by TWO columns:
     3a. Core Diameter (mm)  — integer or decimal mm (e.g. 94, 93.5)
     3b. Core Height   (mm)  — integer or decimal mm (e.g. 95, 188)
 - All other columns are the same. Extract core_diameter_mm and
-  core_height_mm for shotcrete rows; null for normal-cube rows.
+  core_height_mm for core-form rows; null for normal-cube rows.
+- A page is a CORE/shotcrete page ONLY if the printed form TITLE
+  contains "Core" (e.g. "Core Record and Core Compressive Strength").
+  A normal "Cube" page with extra handwritten rows is NOT a core page
+  — never classify by row count alone, only by the printed title.
 
 *** CRITICAL NOTATION STYLE ***
 Some decimal numbers are written in a European shorthand where the fractional
@@ -91,6 +100,7 @@ Extract EVERY cube and EVERY test row on the page into JSON.
 
 OUTPUT FORMAT (JSON only, no explanation):
 {
+  "page_is_shotcrete": false,
   "cubes": [
     {
       "cube_no": "XXX",
@@ -101,6 +111,12 @@ OUTPUT FORMAT (JSON only, no explanation):
     }
   ]
 }
+
+The top-level "page_is_shotcrete" field is true ONLY when the printed
+form TITLE on the page contains the word "Core" (the "Core Record and
+Core Compressive Strength Test Forms" form). Set it to false for
+normal "Cube" pages ("...Cube Compressive Strength Test Forms"), even
+if a cube has more than 3 rows per age.
 (The placeholders above — 9999, 999.99, 99.99 — are NOT real. They only
 show FIELD SHAPE. Do NOT echo them. Never emit 9999 / 999.99 / 99.99 in
 your answer. Every numeric value must come from the handwritten entries
@@ -379,25 +395,30 @@ def _auto_pick_top3(group: list[dict]) -> None:
 
 def _process_shotcrete_cubes(cubes_data: dict) -> dict:
     """
-    Detect shotcrete groups (5 or 10 rows per age) and pre-select the top
-    3 specimens per age by compressive strength. Sets `cube["_shotcrete"]
-    = True` and a `_selected` flag on each test.
+    Mark every cube on a core/shotcrete page as shotcrete and pre-select
+    the top 3 specimens per age by compressive strength. Sets
+    `cube["_shotcrete"] = True` and a `_selected` flag on each test.
 
-    For the 10-per-age two-set case we also tag each test with `_set_index`
-    (1 or 2) so the downstream splitter can keep the right rows together.
-    Normal cubes (3 or 6 rows per age) are returned unchanged.
+    GATE: the page TITLE is authoritative. A cube is shotcrete iff its
+    source page was flagged `_shotcrete_page=True` by Gemini (the printed
+    title contains "Core" — the "Core Record and Core Compressive Strength
+    Test Forms" form). The row count is NOT used to gate: a core page may
+    have any number of rows per cube (Gemini may misread 5 as 4 or 6), but
+    if the title says "Core" the cube is shotcrete. This prevents core-page
+    cubes from leaking into the normal multi-set splitter (which would
+    wrongly split a 5-row group into "2 sets").
+
+    For the 10-per-age two-set case `_auto_pick_top3` tags each test with
+    `_set_index` (1 or 2) so the downstream splitter keeps the right rows
+    together.
     """
     for cube in cubes_data.get("cubes", []):
+        if not cube.get("_shotcrete_page"):
+            continue
+        cube["_shotcrete"] = True
         tests = cube.get("tests", [])
         t7 = [t for t in tests if t.get("age_days") == 7]
         t28 = [t for t in tests if t.get("age_days") == 28]
-        is_shot = (
-            (len(t7) >= 5 and len(t7) % 5 == 0)
-            or (len(t28) >= 5 and len(t28) % 5 == 0)
-        )
-        if not is_shot:
-            continue
-        cube["_shotcrete"] = True
         _auto_pick_top3(t7)
         _auto_pick_top3(t28)
     return cubes_data
@@ -482,9 +503,14 @@ def _file_sha256(file_path: str) -> str:
     return h.hexdigest()
 
 
+# Bump when the Gemini PROMPT or cube post-processing changes shape;
+# busts stale caches so old reads aren't reused with new logic.
+_PROMPT_VERSION = "v3"
+
+
 def _cache_path_for(digest: str, model_name: str) -> Path:
     safe_model = model_name.replace("/", "_").replace("\\", "_")
-    return _cache_dir() / f"{digest}_{safe_model}.json"
+    return _cache_dir() / f"{digest}_{safe_model}_{_PROMPT_VERSION}.json"
 
 
 def clear_gemini_cache() -> int:
@@ -575,8 +601,11 @@ def read_notebook(file_path: str, progress_cb=None) -> dict:
 
     # Preserve original page order so shotcrete set-splitting stays consistent.
     for idx in sorted(results.keys()):
-        for cube in results[idx].get("cubes", []):
+        page_data = results[idx]
+        page_is_shot = bool(page_data.get("page_is_shotcrete", False))
+        for cube in page_data.get("cubes", []):
             cube["_page"] = idx
+            cube["_shotcrete_page"] = page_is_shot
             merged["cubes"].append(cube)
     _log(f"=== all pages done, total {len(merged['cubes'])} cubes")
 

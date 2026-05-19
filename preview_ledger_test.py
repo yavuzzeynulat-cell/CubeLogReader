@@ -5,15 +5,23 @@ import writer
 
 
 # Stub out Excel-touching writer functions
-def _fake_find(*a, **k):
-    return (None, _FakeWS(), "Concrete sample form (ALL).xlsx", "Concrete")
-
-
 class _FakeWS:
     def Range(self, _):
         class _R:
             Value = None
         return _R()
+
+
+def _fake_find(*a, **k):
+    return (None, _FakeWS(), "Concrete sample form (ALL).xlsx", "Concrete")
+
+
+def _fake_find_candidates(*a, **k):
+    # Two open ledgers → exercises the in-window file selector dropdown.
+    return [
+        (None, _FakeWS(), "Concrete sample form (ALL).xlsx", "Concrete"),
+        (None, _FakeWS(), "Concrete sample form APRIL.xlsx", "Concrete"),
+    ]
 
 
 def _fake_blocks(ws):
@@ -65,6 +73,7 @@ def _fake_values(ws, blocks):
 
 
 writer.find_ledger_sheet = _fake_find
+writer.find_ledger_candidates = _fake_find_candidates
 writer.read_ledger_blocks = _fake_blocks
 writer.read_ledger_values = _fake_values
 

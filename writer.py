@@ -489,12 +489,12 @@ def ledger_sample_key(mark) -> str | None:
     return f"{prefix}-{num}" if prefix else str(num)
 
 
-def find_ledger_sheet():
+def find_ledger_candidates():
     """
-    Locate the ledger sheet ("Concrete") in any open workbook.
+    Locate every open workbook that holds a ledger sheet ("Concrete").
     Validation: A7 mentions "Cube No" and B7 mentions "Sampling Mark".
-    Returns (workbook_com, worksheet_com, workbook_name, sheet_name).
-    Raises RuntimeError on 0 / >1 candidates.
+    Returns a list of (workbook_com, worksheet_com, workbook_name, sheet_name).
+    Raises RuntimeError only when there are 0 candidates.
     """
     excel = connect_to_excel()
     candidates = []
@@ -517,6 +517,17 @@ def find_ledger_sheet():
             "sheet with 'Cube No.' / 'Site Sampling Mark/No:' headers "
             "on row 7. Open the ledger file first."
         )
+    return candidates
+
+
+def find_ledger_sheet():
+    """
+    Locate the single ledger sheet ("Concrete").
+    Returns (workbook_com, worksheet_com, workbook_name, sheet_name).
+    Raises RuntimeError on 0 / >1 candidates. Retained for callers that
+    require exactly one ledger; the UI uses find_ledger_candidates().
+    """
+    candidates = find_ledger_candidates()
     if len(candidates) > 1:
         names = ", ".join(f"{w}/{s}" for _, _, w, s in candidates)
         raise RuntimeError(f"Multiple ledger sheets found: {names}")
@@ -644,6 +655,9 @@ def merge_cubes_for_ledger(cubes_data: dict) -> list[dict]:
     order: list = []
     for cube in cubes_data.get("cubes", []):
         if cube.get("_shotcrete"):
+            continue
+        # Card unticked in the first PreviewWindow — exclude from the ledger.
+        if cube.get("_card_enabled") is False:
             continue
         key = ledger_sample_key(cube.get("sample_mark"))
         if key is None:

@@ -34,6 +34,7 @@ def _make_cubes():
             # 2) Shotcrete single-set (5+5)
             {
                 "cube_no": "501", "sample_mark": "G-CON-7001",
+                "_shotcrete_page": True,
                 "tests": [
                     {"age_days": 7,  "core_diameter_mm": 94, "core_height_mm": 188, "weight_gr": 2110, "load_kn": 275.20, "strength_nmm2": 39.60},
                     {"age_days": 7,  "core_diameter_mm": 94, "core_height_mm": 188, "weight_gr": 2098, "load_kn": 268.40, "strength_nmm2": 38.52},
@@ -50,6 +51,7 @@ def _make_cubes():
             # 3) Shotcrete two-set (10+10) — splitter should produce 2 sub-cubes
             {
                 "cube_no": "502", "sample_mark": "G-CON-7002",
+                "_shotcrete_page": True,
                 "tests":
                     [{"age_days": 7, "core_diameter_mm": 94, "core_height_mm": 188,
                       "weight_gr": 2100 + k, "load_kn": 270.0 + k, "strength_nmm2": 35.0 + k}

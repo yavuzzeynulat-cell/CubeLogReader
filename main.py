@@ -51,16 +51,25 @@ except Exception:
     _DND_AVAILABLE = False
 
 
-class DnDCTk(ctk.CTk):
-    """ctk.CTk with tkinterdnd2 drop-target support mixed in."""
+if _DND_AVAILABLE:
+    class DnDCTk(ctk.CTk, TkinterDnD.DnDWrapper):
+        """ctk.CTk with tkinterdnd2 drop-target support mixed in.
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        if _DND_AVAILABLE:
+        DnDWrapper MUST be a base class. tkinterdnd2 attaches
+        drop_target_register / dnd_bind to tkinter.BaseWidget and to
+        DnDWrapper — but tkinter.Tk (and therefore ctk.CTk) does NOT
+        inherit BaseWidget. Without this mixin those methods are absent
+        on the root window and drop-target registration fails silently.
+        """
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
             try:
                 self.TkdndVersion = TkinterDnD._require(self)
             except Exception:
                 pass
+else:
+    DnDCTk = ctk.CTk  # type: ignore
 
 
 def _parse_dropped_paths(raw: str) -> list[str]:
@@ -228,6 +237,10 @@ class SettingsDialog:
             title_wrap, text="API key and Gemini model used to read notebook pages.",
             font=ctk.CTkFont(size=11), text_color="gray55", anchor="w",
         ).pack(anchor="w")
+        ctk.CTkLabel(
+            header, text="v" + updater._read_local_version(),
+            font=ctk.CTkFont(size=12), text_color="gray55",
+        ).pack(side="right", padx=22, pady=8)
 
         # ---- BODY ----
         body = ctk.CTkFrame(self.win, fg_color="transparent")
@@ -334,7 +347,7 @@ class SettingsDialog:
             command=self._save,
         ).pack(side="right", padx=6, pady=10)
         ctk.CTkButton(
-            btns, text="Guncellemeleri kontrol et", width=180, height=36,
+            btns, text="Check for updates", width=180, height=36,
             fg_color="#2E7D32", hover_color="#1B5E20",
             command=self._on_check_updates,
         ).pack(side="left", padx=16, pady=10)
@@ -343,14 +356,14 @@ class SettingsDialog:
         info = updater.check_for_update(timeout=8)
         if info is None:
             messagebox.showinfo(
-                "Guncelleme yok", "En guncel surumdesin.", parent=self.win
+                "No update", "You are on the latest version.", parent=self.win
             )
             return
         msg = (
-            f"Yeni surum: {info.version}\n\n{info.notes}\n\n"
-            "Simdi guncellensin mi?"
+            f"New version: {info.version}\n\n{info.notes}\n\n"
+            "Update now?"
         )
-        if messagebox.askyesno("Guncelleme mevcut", msg, parent=self.win):
+        if messagebox.askyesno("Update available", msg, parent=self.win):
             updater.run_update_flow(info, parent_window=self.win)
 
     def _toggle_show(self):
@@ -483,6 +496,12 @@ class PreviewWindow:
         if self._closed:
             return
         self._closed = True
+        # Auto-save edits into cubes_data so they survive into LedgerPreview
+        # and any later reopen via the Results button.
+        try:
+            self._persist_edits_to_cubes()
+        except Exception:
+            pass
         try:
             self.win.destroy()
         except Exception:
@@ -542,7 +561,7 @@ class PreviewWindow:
             ).pack(side="left")
 
         ctk.CTkButton(
-            top, text="Cancel", width=90,
+            top, text="Close", width=90,
             fg_color="gray70", hover_color="gray60",
             command=self._close,
         ).pack(side="right", padx=(0, 10), pady=12)
@@ -1117,7 +1136,9 @@ class PreviewWindow:
 
         left_box = ctk.CTkFrame(header, fg_color="transparent")
         left_box.grid(row=0, column=0, sticky="w")
-        cube_enabled = BooleanVar(value=sheet is not None)
+        # Default unticked; the per-group auto-tick logic below decides
+        # whether to enable based on Excel emptiness AND notebook values.
+        cube_enabled = BooleanVar(value=False)
         ctk.CTkCheckBox(
             left_box, text="Write this sample",
             variable=cube_enabled, font=self._check_font,
@@ -1181,9 +1202,47 @@ class PreviewWindow:
             grid, 7, "28-day", AGE_28_COLOR, tests_28[:5]
         )
 
-        # Per-group enable checkbox (re-uses 7d / 28d lists)
-        check_7d = BooleanVar(value=True)
-        check_28d = BooleanVar(value=True)
+        # Read Excel state for the 3 target slots per age so the per-group
+        # ticks auto-enable only when there's actually work to do — mirrors
+        # the normal-cube behavior the user expects.
+        excel_w7_empty = [True, True, True]
+        excel_l7_empty = [True, True, True]
+        excel_w28_empty = [True, True, True]
+        excel_l28_empty = [True, True, True]
+        if sheet:
+            try:
+                excel_vals = writer.read_all_values(
+                    sheet["workbook"], sheet["sheet"]
+                )
+                excel_w7_empty = [writer.is_cell_empty(v)
+                                  for v in excel_vals["weights_7d"]]
+                excel_l7_empty = [writer.is_cell_empty(v)
+                                  for v in excel_vals["loads_7d"]]
+                excel_w28_empty = [writer.is_cell_empty(v)
+                                   for v in excel_vals["weights_28d"]]
+                excel_l28_empty = [writer.is_cell_empty(v)
+                                   for v in excel_vals["loads_28d"]]
+            except Exception:
+                pass
+
+        def _any_selected_has_value(rows):
+            for r in rows:
+                if not r["sel"].get():
+                    continue
+                if r["weight_var"].get().strip() or r["load_var"].get().strip():
+                    return True
+            return False
+
+        any_excel_7_empty = any(excel_w7_empty) or any(excel_l7_empty)
+        any_excel_28_empty = any(excel_w28_empty) or any(excel_l28_empty)
+        any_val_7 = _any_selected_has_value(rows_7d)
+        any_val_28 = _any_selected_has_value(rows_28d)
+
+        check_7d = BooleanVar(value=any_excel_7_empty and any_val_7)
+        check_28d = BooleanVar(value=any_excel_28_empty and any_val_28)
+        cube_enabled.set(
+            (sheet is not None) and (check_7d.get() or check_28d.get())
+        )
 
         # For arrow-key focus navigation: flatten only the selected rows'
         # weight/load widgets so navigation behaves like normal cubes.
@@ -1447,8 +1506,87 @@ class PreviewWindow:
             except Exception:
                 pass
 
+    def _persist_edits_to_cubes(self):
+        """Write user-edited StringVar values back into cubes_data["cubes"][i]["tests"]
+        so a later LedgerPreviewWindow or reopened PreviewWindow sees the corrections,
+        not the original Gemini reads."""
+        def _to_float_or_none(s):
+            s = (s or "").strip()
+            if not s:
+                return None
+            try:
+                return float(s)
+            except ValueError:
+                return None
+
+        for entry in self.entries:
+            cube = entry["cube"]
+            # Persist the per-card "Write this sample" checkbox so windows
+            # opened later (e.g. the ledger preview) can exclude cards the
+            # user unticked here.
+            cube["_card_enabled"] = bool(entry["cube_enabled"].get())
+            if entry.get("shotcrete"):
+                tests_7 = [t for t in cube.get("tests", []) if t.get("age_days") == 7]
+                tests_28 = [t for t in cube.get("tests", []) if t.get("age_days") == 28]
+                for i, row in enumerate(entry["shot_rows_7d"]):
+                    if i >= len(tests_7):
+                        break
+                    t = tests_7[i]
+                    t["weight_gr"] = _to_float_or_none(row["weight_var"].get())
+                    t["load_kn"] = _to_float_or_none(row["load_var"].get())
+                    t["core_diameter_mm"] = _to_float_or_none(row["diam_var"].get())
+                    t["core_height_mm"] = _to_float_or_none(row["height_var"].get())
+                    t["strength_nmm2"] = _to_float_or_none(row["strength_var"].get())
+                    t["_selected"] = bool(row["sel"].get())
+                for i, row in enumerate(entry["shot_rows_28d"]):
+                    if i >= len(tests_28):
+                        break
+                    t = tests_28[i]
+                    t["weight_gr"] = _to_float_or_none(row["weight_var"].get())
+                    t["load_kn"] = _to_float_or_none(row["load_var"].get())
+                    t["core_diameter_mm"] = _to_float_or_none(row["diam_var"].get())
+                    t["core_height_mm"] = _to_float_or_none(row["height_var"].get())
+                    t["strength_nmm2"] = _to_float_or_none(row["strength_var"].get())
+                    t["_selected"] = bool(row["sel"].get())
+                continue
+
+            tests = cube.get("tests", [])
+            tests_7 = [t for t in tests if t.get("age_days") == 7]
+            tests_28 = [t for t in tests if t.get("age_days") == 28]
+            other = [t for t in tests if t.get("age_days") not in (7, 28)]
+
+            new_7d = []
+            for i, (w_var, l_var) in enumerate(zip(entry["weights_7d"], entry["loads_7d"])):
+                w = _to_float_or_none(w_var.get())
+                l = _to_float_or_none(l_var.get())
+                if w is None and l is None:
+                    continue
+                t = dict(tests_7[i]) if i < len(tests_7) else {}
+                t["age_days"] = 7
+                t["weight_gr"] = w
+                t["load_kn"] = l
+                new_7d.append(t)
+
+            new_28d = []
+            for i, (w_var, l_var) in enumerate(zip(entry["weights_28d"], entry["loads_28d"])):
+                w = _to_float_or_none(w_var.get())
+                l = _to_float_or_none(l_var.get())
+                if w is None and l is None:
+                    continue
+                t = dict(tests_28[i]) if i < len(tests_28) else {}
+                t["age_days"] = 28
+                t["weight_gr"] = w
+                t["load_kn"] = l
+                new_28d.append(t)
+
+            cube["tests"] = new_7d + new_28d + other
+
     def _do_write(self):
         """Write to Excel button handler."""
+        # Persist user edits FIRST so they survive into the ledger preview
+        # (and any later reopen of this window) even if Excel write fails.
+        self._persist_edits_to_cubes()
+
         written_sheets = 0
         total_cells = 0
         all_errors: list[str] = []
@@ -1641,59 +1779,101 @@ class LedgerPreviewWindow:
         self.sheet_name: str | None = None
         self.entries: list[dict] = []  # {cube, block, mismatch, weights_ledger, loads_ledger, enabled_var}
         self.not_found: list[str] = []
+        self._ws = None  # current ledger worksheet COM reference
 
         # Arrow-key card navigation (same pattern as PreviewWindow)
         self._cards: list = []
         self._selected_idx: int | None = None
         self._cube_list = None  # assigned when the scrollable frame is built
+        self._scroll_anim_id: str | None = None
 
+        # Discover every open ledger workbook; the user picks one when 2+.
+        self._candidates: list = []
+        self._cand_labels: list[str] = []
+        self._cand_index = 0
+        self._ledger_menu = None
+        self._body = None
+        self._title_label = None
         try:
-            wb, ws, wb_name, sh_name = writer.find_ledger_sheet()
-            self.wb_name = wb_name
-            self.sheet_name = sh_name
-            self._ws = ws  # keep COM reference alive while window is open
-            blocks = writer.read_ledger_blocks(ws)
-            values = writer.read_ledger_values(ws, blocks)
-            merged = writer.merge_cubes_for_ledger(cubes_data)
-            matches = writer.match_cubes_to_blocks(merged, blocks)
-
-            # Diagnostic dump — every PDF cube key + every ledger block key
-            try:
-                from reader import _log
-                _log(f"[LEDGER-DEBUG] {len(blocks)} ledger blocks, {len(merged)} PDF cubes")
-                for c in merged:
-                    _log(f"  PDF cube → key={c.get('sample_key')!r} cube_no={c.get('cube_no')!r} mark={c.get('sample_mark')!r}")
-                # Only dump blocks whose key starts the same as any PDF key, plus any G26-CON
-                pdf_keys = {c.get('sample_key') for c in merged}
-                for b in blocks:
-                    bk = b.get('sample_key')
-                    if bk in pdf_keys or (isinstance(bk, str) and bk.upper().startswith('G26')):
-                        _log(f"  LEDGER block → key={bk!r} cube_no={b.get('cube_no')!r} raw={b.get('sample_mark_raw')!r} rows={b['start_row']}-{b['end_row']}")
-            except Exception as _e:
-                pass
-
-            block_idx_by_id = {id(b): i for i, b in enumerate(blocks)}
-            for m in matches:
-                cube = m["cube"]
-                block = m["block"]
-                reason = m["mismatch_reason"]
-                if block is None:
-                    self.not_found.append(cube.get("sample_mark", "?"))
-                    continue
-                bi = block_idx_by_id[id(block)]
-                vals = values.get(bi, {"weights": [], "loads": []})
-                self.entries.append({
-                    "cube": cube,
-                    "block": block,
-                    "mismatch": reason,
-                    "weights_ledger": vals["weights"],
-                    "loads_ledger": vals["loads"],
-                    "enabled": BooleanVar(value=reason is None),
-                })
+            self._candidates = writer.find_ledger_candidates()
         except Exception as e:
             self.ledger_error = str(e)
 
+        # Build dropdown labels (workbook names, de-duplicated on collision).
+        seen: dict[str, int] = {}
+        for (_w, _ws, wb_name, _sh) in self._candidates:
+            if wb_name in seen:
+                seen[wb_name] += 1
+                self._cand_labels.append(f"{wb_name} ({seen[wb_name]})")
+            else:
+                seen[wb_name] = 1
+                self._cand_labels.append(wb_name)
+
+        if self._candidates:
+            self._load_ledger(self._candidates[0])
+
         self._build_ui()
+
+    def _load_ledger(self, candidate) -> bool:
+        """Read one ledger workbook and populate self.entries / self.not_found.
+        Re-callable: the file selector invokes it on switch. On failure the
+        previous state is left intact and False is returned."""
+        wb, ws, wb_name, sh_name = candidate
+        try:
+            blocks = writer.read_ledger_blocks(ws)
+            values = writer.read_ledger_values(ws, blocks)
+            merged = writer.merge_cubes_for_ledger(self.cubes_data)
+            matches = writer.match_cubes_to_blocks(merged, blocks)
+        except Exception as e:
+            self.ledger_error = str(e)
+            return False
+
+        # Diagnostic dump — every PDF cube key + every ledger block key
+        try:
+            from reader import _log
+            _log(f"[LEDGER-DEBUG] {wb_name}: {len(blocks)} ledger blocks, {len(merged)} PDF cubes")
+            for c in merged:
+                _log(f"  PDF cube → key={c.get('sample_key')!r} cube_no={c.get('cube_no')!r} mark={c.get('sample_mark')!r}")
+            # Only dump blocks whose key starts the same as any PDF key, plus any G26-CON
+            pdf_keys = {c.get('sample_key') for c in merged}
+            for b in blocks:
+                bk = b.get('sample_key')
+                if bk in pdf_keys or (isinstance(bk, str) and bk.upper().startswith('G26')):
+                    _log(f"  LEDGER block → key={bk!r} cube_no={b.get('cube_no')!r} raw={b.get('sample_mark_raw')!r} rows={b['start_row']}-{b['end_row']}")
+        except Exception:
+            pass
+
+        entries: list[dict] = []
+        not_found: list[str] = []
+        block_idx_by_id = {id(b): i for i, b in enumerate(blocks)}
+        for m in matches:
+            cube = m["cube"]
+            block = m["block"]
+            reason = m["mismatch_reason"]
+            if block is None:
+                not_found.append(cube.get("sample_mark", "?"))
+                continue
+            bi = block_idx_by_id[id(block)]
+            vals = values.get(bi, {"weights": [], "loads": []})
+            entries.append({
+                "cube": cube,
+                "block": block,
+                "mismatch": reason,
+                "weights_ledger": vals["weights"],
+                "loads_ledger": vals["loads"],
+                "enabled": BooleanVar(value=reason is None),
+            })
+
+        # Commit — only reached when the COM reads succeeded.
+        self.ledger_error = None
+        self.wb_name = wb_name
+        self.sheet_name = sh_name
+        self._ws = ws  # keep COM reference alive while window is open
+        self.entries = entries
+        self.not_found = not_found
+        self._cards = []
+        self._selected_idx = None
+        return True
 
     def _close(self):
         if self._closed:
@@ -1720,20 +1900,11 @@ class LedgerPreviewWindow:
         top.pack(side="top", fill="x")
         top.pack_propagate(False)
 
-        if self.ledger_error:
-            title = "Ledger Preview — ERROR"
-        else:
-            ok_cnt = sum(1 for e in self.entries if e["mismatch"] is None)
-            bad_cnt = sum(1 for e in self.entries if e["mismatch"] is not None)
-            title = (
-                f"Ledger Preview — {self.sheet_name}  ·  "
-                f"{ok_cnt} ready, {bad_cnt} mismatched, "
-                f"{len(self.not_found)} not found"
-            )
-        ctk.CTkLabel(
-            top, text=title,
+        self._title_label = ctk.CTkLabel(
+            top, text=self._compute_title(),
             font=ctk.CTkFont(size=14, weight="bold"),
-        ).pack(side="left", padx=20, pady=16)
+        )
+        self._title_label.pack(side="left", padx=20, pady=16)
 
         ctk.CTkButton(
             top, text="Cancel", width=90,
@@ -1755,9 +1926,97 @@ class LedgerPreviewWindow:
         if not writable:
             self.write_btn.configure(state="disabled")
 
+        # ---- LEDGER FILE SELECTOR (subtle, just under the header) ----
+        self._build_selector()
+
         # ---- BODY ----
+        self._build_body()
+
+    def _compute_title(self) -> str:
+        """Header text reflecting the currently loaded ledger."""
+        if self.ledger_error or self.sheet_name is None:
+            return "Ledger Preview — ERROR"
+        ok_cnt = sum(1 for e in self.entries if e["mismatch"] is None)
+        bad_cnt = sum(1 for e in self.entries if e["mismatch"] is not None)
+        return (
+            f"Ledger Preview — {self.sheet_name}  ·  "
+            f"{ok_cnt} ready, {bad_cnt} mismatched, "
+            f"{len(self.not_found)} not found"
+        )
+
+    def _build_selector(self):
+        """Row under the header: a static label for 1 ledger, or a small
+        dropdown when 2+ ledger workbooks are open."""
+        bar = ctk.CTkFrame(self.win, fg_color="transparent")
+        bar.pack(side="top", fill="x", padx=22, pady=(6, 0))
+        if not self._candidates:
+            return
+        sel_font = ctk.CTkFont(family="Segoe UI", size=11)
+        if len(self._candidates) == 1:
+            ctk.CTkLabel(
+                bar, text=f"Yazılacak dosya: {self._cand_labels[0]}",
+                font=sel_font, text_color="gray55",
+            ).pack(side="left")
+        else:
+            ctk.CTkLabel(
+                bar, text="Ledger dosyası:",
+                font=sel_font, text_color="gray55",
+            ).pack(side="left", padx=(0, 6))
+            self._ledger_menu = ctk.CTkOptionMenu(
+                bar, values=self._cand_labels,
+                command=self._on_select_ledger,
+                font=sel_font, height=24, width=280,
+                fg_color="gray25", button_color="gray30",
+                button_hover_color="gray35", text_color="gray80",
+                dropdown_font=sel_font,
+            )
+            self._ledger_menu.set(self._cand_labels[self._cand_index])
+            self._ledger_menu.pack(side="left")
+
+    def _on_select_ledger(self, choice: str):
+        """Dropdown handler: switch to another open ledger workbook."""
+        try:
+            idx = self._cand_labels.index(choice)
+        except ValueError:
+            return
+        if idx == self._cand_index:
+            return
+        prev = self._cand_index
+        self._cand_index = idx
+        if self._load_ledger(self._candidates[idx]):
+            self._refresh_view()
+        else:
+            # Reload failed (e.g. that workbook was closed) — revert.
+            err = self.ledger_error or "unknown error"
+            self.ledger_error = None
+            self._cand_index = prev
+            if self._ledger_menu is not None:
+                self._ledger_menu.set(self._cand_labels[prev])
+            messagebox.showwarning(
+                "Ledger",
+                "Could not load that ledger file:\n" + err,
+                parent=self.win,
+            )
+
+    def _refresh_view(self):
+        """Re-render the header title, write button and card area after a
+        ledger switch."""
+        if self._title_label is not None:
+            self._title_label.configure(text=self._compute_title())
+        writable = any(e["mismatch"] is None for e in self.entries)
+        self.write_btn.configure(state="normal" if writable else "disabled")
+        if self._body is not None:
+            try:
+                self._body.destroy()
+            except Exception:
+                pass
+        self._build_body()
+
+    def _build_body(self):
+        """(Re)build the legend + not-found banner + scrollable card area."""
         body = ctk.CTkFrame(self.win, fg_color="transparent")
         body.pack(side="top", fill="both", expand=True, padx=16, pady=12)
+        self._body = body
 
         if self.ledger_error:
             ctk.CTkLabel(
@@ -2029,6 +2288,8 @@ class LedgerPreviewWindow:
         self._scroll_to_card_centered(idx)
 
     def _scroll_to_card_centered(self, idx: int):
+        """Animate the card list so card idx sits vertically centered
+        (same smooth ease-out scroll as the first PreviewWindow)."""
         canvas = getattr(self._cube_list, "_parent_canvas", None)
         if canvas is None:
             return
@@ -2038,14 +2299,47 @@ class LedgerPreviewWindow:
         if not bbox:
             return
         total_h = bbox[3] - bbox[1]
-        if total_h <= 0:
-            return
+        view_h = canvas.winfo_height()
+        if total_h <= view_h:
+            return  # nothing to scroll
         card_y = card.winfo_y()
         card_h = card.winfo_height()
-        view_h = canvas.winfo_height()
         target = card_y + card_h / 2 - view_h / 2
         target = max(0, min(target, total_h - view_h))
-        canvas.yview_moveto(target / total_h)
+        self._animate_scroll(canvas, target / total_h, duration_ms=220)
+
+    def _animate_scroll(self, canvas, target_frac: float, duration_ms: int = 220):
+        """Ease-out animated yview_moveto."""
+        if self._scroll_anim_id is not None:
+            try:
+                self.win.after_cancel(self._scroll_anim_id)
+            except Exception:
+                pass
+            self._scroll_anim_id = None
+
+        frame_ms = 16
+        frames = max(1, duration_ms // frame_ms)
+        try:
+            start_frac = canvas.yview()[0]
+        except Exception:
+            start_frac = 0.0
+
+        def step(i):
+            t = i / frames
+            ease = 1 - (1 - t) ** 3  # ease-out cubic
+            pos = start_frac + (target_frac - start_frac) * ease
+            try:
+                canvas.yview_moveto(pos)
+            except Exception:
+                return
+            if i < frames:
+                self._scroll_anim_id = self.win.after(
+                    frame_ms, lambda: step(i + 1)
+                )
+            else:
+                self._scroll_anim_id = None
+
+        step(1)
 
     def _do_write(self):
         if self.ledger_error:
@@ -2146,6 +2440,10 @@ class MainWindow:
         # Ledger state — cubes_data from the most recent successful
         # first-Excel write. Enables the "Go to Books Excel section" button.
         self._last_cubes_data: dict | None = None
+        # Cached merged image + scan_result so the "Sonuçlar" button can
+        # reopen the PreviewWindow on demand.
+        self._last_image = None
+        self._last_scan_result: dict | None = None
 
         self._build_ui()
         self._register_dnd()
@@ -2202,7 +2500,17 @@ class MainWindow:
             width=90, height=32,
             fg_color="gray70", hover_color="gray60",
             command=self._open_settings,
-        ).pack(side="right", padx=16, pady=18)
+        ).pack(side="right", padx=(0, 16), pady=18)
+
+        self.results_btn = ctk.CTkButton(
+            header,
+            text="Results",
+            width=80, height=32,
+            fg_color="#6A1B9A", hover_color="#4A148C",
+            command=self._on_open_results,
+            state="disabled",
+        )
+        self.results_btn.pack(side="right", padx=(0, 8), pady=18)
 
         # ---- BODY ----
         body = ctk.CTkFrame(self.root, fg_color="transparent")
@@ -2270,17 +2578,6 @@ class MainWindow:
         )
         self.pick_btn.pack(fill="x", pady=(4, 0))
 
-        hint_text = (
-            "Tip: drag & drop PDFs/images onto this window — batch supported."
-            if _DND_AVAILABLE else
-            "Tip: select multiple files to process them in sequence."
-        )
-        ctk.CTkLabel(
-            body, text=hint_text,
-            font=ctk.CTkFont(size=11),
-            text_color="gray55",
-        ).pack(pady=(6, 0))
-
         # Secondary action: open the ledger preview.
         # Disabled until the user finishes a first-Excel write.
         self.ledger_btn = ctk.CTkButton(
@@ -2319,6 +2616,39 @@ class MainWindow:
         if not hasattr(self, "ledger_btn"):
             return
         self.ledger_btn.configure(state="normal" if enabled else "disabled")
+
+    def _set_results_enabled(self, enabled: bool):
+        if not hasattr(self, "results_btn"):
+            return
+        self.results_btn.configure(state="normal" if enabled else "disabled")
+
+    def _on_open_results(self):
+        if self._last_cubes_data is None or self._last_image is None:
+            messagebox.showinfo(
+                "Results",
+                "No results yet. Pick a notebook page first.",
+                parent=self.root,
+            )
+            return
+        try:
+            PreviewWindow(
+                self.root,
+                self._last_image,
+                self._last_cubes_data,
+                self._last_scan_result or {"sheets": [], "scanned_count": 0},
+                on_close=None,
+            )
+        except Exception as e:
+            tb = traceback.format_exc()
+            reader._log(f"--- RESULTS REOPEN ERROR ---\n{tb}")
+            short = str(e)
+            if len(short) > 500:
+                short = short[:500] + "..."
+            messagebox.showerror(
+                "Results Error",
+                f"{short}\n\n(Full traceback saved to gemini_debug.log)",
+                parent=self.root,
+            )
 
     def _on_open_ledger(self):
         if self._last_cubes_data is None:
@@ -2552,7 +2882,10 @@ class MainWindow:
             "darkgreen",
         )
         self._last_cubes_data = merged_data
+        self._last_image = merged_image
+        self._last_scan_result = scan_result
         self._set_ledger_enabled(True)
+        self._set_results_enabled(True)
         self._pending_results = []
 
         try:
@@ -2619,10 +2952,10 @@ def _start_update_check_thread(root):
 
 def _prompt_user_for_update(root, info):
     msg = (
-        f"Yeni surum mevcut: {info.version}\n\n{info.notes}\n\n"
-        "Simdi guncellensin mi?"
+        f"New version available: {info.version}\n\n{info.notes}\n\n"
+        "Update now?"
     )
-    if messagebox.askyesno("Guncelleme mevcut", msg, parent=root):
+    if messagebox.askyesno("Update available", msg, parent=root):
         updater.run_update_flow(info, parent_window=root)
 
 
