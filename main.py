@@ -116,7 +116,7 @@ SCAN_MODES = {
     "short": ("25 sheets forward from active (fast)", 25),
     "long": ("350 sheets forward from active (whole workbook)", 350),
 }
-DEFAULT_SCAN_MODE = "short"
+DEFAULT_SCAN_MODE = "long"
 IMAGE_CANVAS_WIDTH = 920
 IMAGE_CANVAS_HEIGHT = 860
 ZOOM_MIN = 0.2
