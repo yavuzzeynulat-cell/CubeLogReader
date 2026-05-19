@@ -38,6 +38,7 @@ import customtkinter as ctk
 from PIL import Image, ImageTk
 
 import reader
+import updater
 import writer
 
 # Optional drag & drop support
@@ -332,6 +333,25 @@ class SettingsDialog:
             fg_color="#2E7D32", hover_color="#1B5E20",
             command=self._save,
         ).pack(side="right", padx=6, pady=10)
+        ctk.CTkButton(
+            btns, text="Guncellemeleri kontrol et", width=180, height=36,
+            fg_color="#2E7D32", hover_color="#1B5E20",
+            command=self._on_check_updates,
+        ).pack(side="left", padx=16, pady=10)
+
+    def _on_check_updates(self):
+        info = updater.check_for_update(timeout=8)
+        if info is None:
+            messagebox.showinfo(
+                "Guncelleme yok", "En guncel surumdesin.", parent=self.win
+            )
+            return
+        msg = (
+            f"Yeni surum: {info.version}\n\n{info.notes}\n\n"
+            "Simdi guncellensin mi?"
+        )
+        if messagebox.askyesno("Guncelleme mevcut", msg, parent=self.win):
+            updater.run_update_flow(info, parent_window=self.win)
 
     def _toggle_show(self):
         self.entry.configure(show="" if self.show_var.get() else "*")
@@ -2585,9 +2605,31 @@ class MainWindow:
         self.root.after(200, self._process_next)
 
 
+def _start_update_check_thread(root):
+    """Background thread: poll GitHub; if new version, prompt user on UI thread."""
+    def worker():
+        info = updater.check_for_update(timeout=5)
+        if info is None:
+            return
+        root.after(0, lambda: _prompt_user_for_update(root, info))
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+
+
+def _prompt_user_for_update(root, info):
+    msg = (
+        f"Yeni surum mevcut: {info.version}\n\n{info.notes}\n\n"
+        "Simdi guncellensin mi?"
+    )
+    if messagebox.askyesno("Guncelleme mevcut", msg, parent=root):
+        updater.run_update_flow(info, parent_window=root)
+
+
 def main():
     root = DnDCTk() if _DND_AVAILABLE else ctk.CTk()
     MainWindow(root)
+    _start_update_check_thread(root)
     root.mainloop()
 
 
