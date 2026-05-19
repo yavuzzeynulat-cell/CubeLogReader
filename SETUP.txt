@@ -1,0 +1,48 @@
+CubeLogReader - Setup on Another Computer
+==========================================
+
+STEP 1: Install Python
+----------------------
+If Python is not installed on the computer:
+  - Go to https://python.org/downloads  ->  "Download Python 3.12" (or newer)
+  - Run the installer
+  - IMPORTANT: tick the "Add Python to PATH" checkbox
+  - Click "Install Now"
+
+STEP 2: Copy the CubeLogReader folder
+-------------------------------------
+Copy the ENTIRE CubeLogReader folder to the new computer via USB / cloud.
+Location doesn't matter (Desktop is recommended).
+
+STEP 3: Install packages
+------------------------
+Open the CubeLogReader folder and double-click "setup.bat".
+This installs the Python packages. May take a minute.
+
+STEP 4: Run the program
+-----------------------
+Double-click "CubeLogReader.bat".
+On first launch it will ask for your API key.
+
+STEP 5: Enter the API key
+-------------------------
+1. Go to https://aistudio.google.com/apikey
+2. Sign in with your Google account
+3. Click "Create API Key"
+4. Copy the long text
+5. Paste it into the program's Settings dialog
+6. Click "Save"
+
+Done! You can now open Excel and upload a notebook page.
+
+CHANGING THE API KEY LATER
+==========================
+Open the program -> "API Key Settings" button -> paste new key -> Save
+(No need to edit the .env file by hand.)
+
+NOTES
+=====
+- The API key is stored in the .env file (kept private)
+- The program only writes into the OPEN Excel, it does not save the
+  file itself (you press Ctrl+S when you're ready)
+- The notebook page can be a PDF or an image (JPG/PNG)

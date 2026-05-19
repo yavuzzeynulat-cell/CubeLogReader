@@ -1,0 +1,32 @@
+# PyInstaller build artifacts
+build/
+dist/
+*.spec.bak
+
+# Caches / runtime
+.cache/
+.claude/scheduled_tasks.lock
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Env / secrets (keep template only)
+.env
+
+# Logs
+*.log
+write_log.txt
+gemini_debug.log
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Update artifacts
+src.zip
