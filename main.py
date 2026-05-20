@@ -1375,16 +1375,10 @@ class PreviewWindow:
         ctk.CTkLabel(grid, text="Strength", width=100,
                      font=self._colhdr_font).grid(row=0, column=6, padx=3)
 
-        rows_7d = self._build_shotcrete_group(
-            grid, 1, "7-day", AGE_7_COLOR, tests_7[:5]
-        )
-        rows_28d = self._build_shotcrete_group(
-            grid, 7, "28-day", AGE_28_COLOR, tests_28[:5]
-        )
-
-        # Read Excel state for the 3 target slots per age so the per-group
-        # ticks auto-enable only when there's actually work to do — mirrors
-        # the normal-cube behavior the user expects.
+        # Read Excel state FIRST so the per-row top-3 selection can
+        # skip auto-ticking rows when the group is already written
+        # ("3 ticks shouldn't appear because the results are already in
+        # Excel" — user request, 2026-05-20).
         excel_w7_empty = [True, True, True]
         excel_l7_empty = [True, True, True]
         excel_w28_empty = [True, True, True]
@@ -1404,6 +1398,24 @@ class PreviewWindow:
                                    for v in excel_vals["loads_28d"]]
             except Exception:
                 pass
+
+        # If ANY cell in the group is already filled, the group is
+        # past us — don't auto-tick any of its 5 specimens.
+        group_7_done = (
+            (not all(excel_w7_empty)) or (not all(excel_l7_empty))
+        )
+        group_28_done = (
+            (not all(excel_w28_empty)) or (not all(excel_l28_empty))
+        )
+
+        rows_7d = self._build_shotcrete_group(
+            grid, 1, "7-day", AGE_7_COLOR, tests_7[:5],
+            suppress_auto_tick=group_7_done,
+        )
+        rows_28d = self._build_shotcrete_group(
+            grid, 7, "28-day", AGE_28_COLOR, tests_28[:5],
+            suppress_auto_tick=group_28_done,
+        )
 
         def _any_selected_has_value(rows):
             for r in rows:
@@ -1469,8 +1481,11 @@ class PreviewWindow:
             "load_empty_28d": [True] * len(rows_28d),
         })
 
-    def _build_shotcrete_group(self, grid, start_row, age_label, age_color, tests):
-        """Build one 5-row shotcrete group. Returns a list of row dicts."""
+    def _build_shotcrete_group(self, grid, start_row, age_label, age_color,
+                                tests, suppress_auto_tick: bool = False):
+        """Build one 5-row shotcrete group. Returns a list of row dicts.
+        When `suppress_auto_tick=True`, no row starts ticked (used when
+        the group's Excel cells are already filled)."""
         ctk.CTkLabel(
             grid, text=age_label, text_color=age_color,
             font=self._age_font, width=70, anchor="w",
@@ -1489,7 +1504,11 @@ class PreviewWindow:
         # Top 3 indices by strength (uses reader's _selected tag if set,
         # otherwise computes fresh from the strength values).
         # Rows with no strength value are never auto-selected.
-        if any("_selected" in t for t in tests):
+        # When suppress_auto_tick is set (the group's Excel cells are
+        # already filled), every row starts unticked.
+        if suppress_auto_tick:
+            top3 = set()
+        elif any("_selected" in t for t in tests):
             top3 = {i for i, t in enumerate(tests) if t.get("_selected")}
         else:
             valid = [i for i in range(len(tests))
