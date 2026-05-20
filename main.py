@@ -585,6 +585,11 @@ class PreviewWindow:
         self._selected_idx: int | None = None
         self._scroll_anim_id: str | None = None
 
+        # Hidden-cards toggle (no-match + nothing-to-write cubes).
+        self._hidden_visible = False
+        self._hideable_cards: list[tuple] = []  # (card_widget, reason)
+        self._hidden_toggle_btn = None
+
         self._build_ui()
         self.win.protocol("WM_DELETE_WINDOW", self._close)
 
@@ -656,6 +661,16 @@ class PreviewWindow:
             text_color="gray55",
             font=ctk.CTkFont(size=11),
         ).pack(side="left")
+
+        # Hidden-cards toggle — populated after cards are built.
+        self._hidden_toggle_btn = ctk.CTkButton(
+            legend, text="",
+            width=210, height=24,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color="#7B1818", hover_color="#5C1010",
+            text_color="#FF8A80",
+            command=self._toggle_hidden,
+        )
 
         if self.match_error:
             ctk.CTkLabel(
@@ -784,10 +799,63 @@ class PreviewWindow:
         for i, m in enumerate(self.matched):
             self._build_cube_card(self._cube_list, i, m)
 
+        # Hide cards that the user can't / shouldn't act on:
+        # - No matched sheet (the cube has nowhere to go), OR
+        # - Both 7-day and 28-day auto-tick defaulted OFF
+        #   (no work — Excel already has data or no notebook values)
+        self._compute_hideable_cards()
+        self._apply_hidden_visibility()
+
         # Arrow-key card navigation (Entry widgets don't use Up/Down so
         # they bubble up to the window binding).
         self.win.bind("<Down>", self._on_card_down)
         self.win.bind("<Up>", self._on_card_up)
+
+    def _compute_hideable_cards(self):
+        """Mark cards as hideable based on entry state."""
+        self._hideable_cards = []
+        for i, entry in enumerate(self.entries):
+            if i >= len(self._cards):
+                continue
+            card = self._cards[i]
+            if not entry.get("matched_sheet"):
+                self._hideable_cards.append((card, "no_match"))
+                continue
+            c7 = entry.get("check_7d")
+            c28 = entry.get("check_28d")
+            c7_on = c7.get() if c7 is not None else False
+            c28_on = c28.get() if c28 is not None else False
+            if not c7_on and not c28_on:
+                self._hideable_cards.append((card, "done"))
+
+    def _apply_hidden_visibility(self):
+        """Pack or pack_forget the hideable cards, and update the toggle
+        button's text + visibility."""
+        if not self._hideable_cards:
+            if self._hidden_toggle_btn is not None:
+                self._hidden_toggle_btn.pack_forget()
+            return
+        for card, _ in self._hideable_cards:
+            if self._hidden_visible:
+                card.pack(fill="x", padx=8, pady=8)
+            else:
+                card.pack_forget()
+        no_match = sum(1 for _, r in self._hideable_cards if r == "no_match")
+        done = sum(1 for _, r in self._hideable_cards if r == "done")
+        arrow = "▾" if self._hidden_visible else "▸"
+        parts = []
+        if done:
+            parts.append(f"{done} done")
+        if no_match:
+            parts.append(f"{no_match} no match")
+        label = f"{arrow}  {len(self._hideable_cards)} hidden ({', '.join(parts)})"
+        if self._hidden_toggle_btn is not None:
+            self._hidden_toggle_btn.configure(text=label)
+            self._hidden_toggle_btn.pack(side="left", padx=(12, 0))
+
+    def _toggle_hidden(self):
+        self._hidden_visible = not self._hidden_visible
+        self._apply_hidden_visibility()
 
     # ---------- Zoom & image canvas helpers ----------
 
@@ -1147,14 +1215,23 @@ class PreviewWindow:
                 w_widgets.append(w_entry)
                 l_widgets.append(l_entry)
 
-            # Per-GROUP checkbox — auto-ticked only if there is work to do:
-            # at least one empty Excel cell AND at least one notebook value.
+            # Per-GROUP checkbox — auto-ticked only if the group is
+            # completely untouched in Excel AND has notebook values to
+            # write. If ANY cell in the group already has data the user
+            # is past this group (e.g. wrote weights last week, doing
+            # loads today) — leave OFF so we don't surprise them.
             any_excel_empty = any(w_empty_list) or any(l_empty_list)
+            group_has_existing_data = (
+                (not all(w_empty_list)) or (not all(l_empty_list))
+            )
             any_value_to_write = any(
                 t.get("weight_gr") is not None or t.get("load_kn") is not None
                 for t in tests[:3]
             )
-            group_var = BooleanVar(value=any_excel_empty and any_value_to_write)
+            group_var = BooleanVar(
+                value=any_excel_empty and any_value_to_write
+                and not group_has_existing_data
+            )
             ctk.CTkCheckBox(
                 grid, text="", variable=group_var, width=24,
             ).grid(
@@ -1341,8 +1418,23 @@ class PreviewWindow:
         any_val_7 = _any_selected_has_value(rows_7d)
         any_val_28 = _any_selected_has_value(rows_28d)
 
-        check_7d = BooleanVar(value=any_excel_7_empty and any_val_7)
-        check_28d = BooleanVar(value=any_excel_28_empty and any_val_28)
+        # If ANY cell in a group already has data, the user already
+        # worked on that group — leave its checkbox OFF.
+        group_7_has_existing = (
+            (not all(excel_w7_empty)) or (not all(excel_l7_empty))
+        )
+        group_28_has_existing = (
+            (not all(excel_w28_empty)) or (not all(excel_l28_empty))
+        )
+
+        check_7d = BooleanVar(
+            value=any_excel_7_empty and any_val_7
+            and not group_7_has_existing
+        )
+        check_28d = BooleanVar(
+            value=any_excel_28_empty and any_val_28
+            and not group_28_has_existing
+        )
         cube_enabled.set(
             (sheet is not None) and (check_7d.get() or check_28d.get())
         )
