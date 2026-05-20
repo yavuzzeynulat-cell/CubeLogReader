@@ -30,3 +30,6 @@ Thumbs.db
 
 # Update artifacts
 src.zip
+
+# Local rollback backups
+_backup_pre_shotcrete/
