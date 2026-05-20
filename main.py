@@ -2222,7 +2222,11 @@ class LedgerPreviewWindow:
         for entry in actionable:
             self._build_card(scroll, entry)
 
-        # Hidden group: done + not-found, only when toggle is on
+        # Hidden group: done + not-found, only when toggle is on.
+        # Done entries get FULL interactive cards (input fields,
+        # per-group checkboxes) so the user can still force a write
+        # if needed. Not-found stays as mini info cards (no block to
+        # write to anyway).
         if self._notfound_visible:
             if done_entries:
                 ctk.CTkLabel(
@@ -2231,7 +2235,7 @@ class LedgerPreviewWindow:
                     font=ctk.CTkFont(size=12, weight="bold"),
                 ).pack(pady=(20, 6))
                 for entry in done_entries:
-                    self._build_done_card(scroll, entry)
+                    self._build_card(scroll, entry)
             if self.not_found:
                 ctk.CTkLabel(
                     scroll, text="── Not found in ledger ──",
@@ -2252,32 +2256,6 @@ class LedgerPreviewWindow:
                 text_color="gray55",
                 font=self._entry_font,
             ).pack(pady=20)
-
-    def _build_done_card(self, parent, entry):
-        cube = entry["cube"]
-        block = entry["block"]
-        card = ctk.CTkFrame(
-            parent, corner_radius=10, border_width=1,
-            border_color="gray40", fg_color=("gray85", "gray20"),
-        )
-        card.pack(fill="x", padx=8, pady=4)
-        row = ctk.CTkFrame(card, fg_color="transparent")
-        row.pack(fill="x", padx=15, pady=8)
-        row.grid_columnconfigure(0, weight=1)
-        row.grid_columnconfigure(1, weight=0)
-        title = (
-            f"Cube No {cube.get('cube_no', '?')}  ·  "
-            f"{cube.get('sample_mark', '?')}  ·  "
-            f"rows {block['start_row']}-{block['end_row']}"
-        )
-        ctk.CTkLabel(
-            row, text=title, font=self._entry_font, text_color="gray60",
-        ).grid(row=0, column=0, sticky="w")
-        ctk.CTkLabel(
-            row, text="[DONE]", font=self._pill_font,
-            text_color="white", fg_color="gray40",
-            corner_radius=8, padx=10, pady=2,
-        ).grid(row=0, column=1, sticky="e")
 
     def _build_notfound_card(self, parent, cube):
         card = ctk.CTkFrame(
@@ -2994,6 +2972,8 @@ class ShotcreteLedgerPreviewWindow:
         for entry in actionable:
             self._build_card(scroll, entry)
 
+        # Done entries get FULL interactive cards (so the user can edit/
+        # force-write if they want). Not-found stays as mini info cards.
         if self._notfound_visible:
             if done_entries:
                 ctk.CTkLabel(
@@ -3002,7 +2982,7 @@ class ShotcreteLedgerPreviewWindow:
                     font=ctk.CTkFont(size=12, weight="bold"),
                 ).pack(pady=(20, 6))
                 for entry in done_entries:
-                    self._build_done_card(scroll, entry)
+                    self._build_card(scroll, entry)
             if self.not_found:
                 ctk.CTkLabel(
                     scroll, text="── Not found in ledger ──",
@@ -3022,32 +3002,6 @@ class ShotcreteLedgerPreviewWindow:
                 text_color="gray55",
                 font=self._entry_font,
             ).pack(pady=20)
-
-    def _build_done_card(self, parent, entry):
-        cube = entry["cube"]
-        block = entry["block"]
-        card = ctk.CTkFrame(
-            parent, corner_radius=10, border_width=1,
-            border_color="gray40", fg_color=("gray85", "gray20"),
-        )
-        card.pack(fill="x", padx=8, pady=4)
-        row = ctk.CTkFrame(card, fg_color="transparent")
-        row.pack(fill="x", padx=15, pady=8)
-        row.grid_columnconfigure(0, weight=1)
-        row.grid_columnconfigure(1, weight=0)
-        title = (
-            f"Core No {cube.get('cube_no', '?')}  ·  "
-            f"{cube.get('sample_mark', '?')}  ·  "
-            f"rows {block['start_row']}-{block['end_row']}"
-        )
-        ctk.CTkLabel(
-            row, text=title, font=self._entry_font, text_color="gray60",
-        ).grid(row=0, column=0, sticky="w")
-        ctk.CTkLabel(
-            row, text="[DONE]", font=self._pill_font,
-            text_color="white", fg_color="gray40",
-            corner_radius=8, padx=10, pady=2,
-        ).grid(row=0, column=1, sticky="e")
 
     def _build_notfound_card(self, parent, cube):
         card = ctk.CTkFrame(
