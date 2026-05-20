@@ -1035,6 +1035,73 @@ def write_ledger_cube(
     return {"wrote": wrote, "errors": errors, "skipped": skipped}
 
 
+def write_shotcrete_ledger_cube(
+    ws, cube: dict, block: dict,
+    write_7d: bool = True, write_28d: bool = True,
+) -> dict:
+    """
+    Shotcrete sibling of write_ledger_cube. For each specimen, writes
+    four values per row:
+      L = Core Diameter, M = Core Height, N = Weight, O = Load.
+
+    Block carries `rows_7d` / `rows_28d` (Excel row numbers per age,
+    from column K). 7d tests fill 7d rows in order; 28d tests fill 28d
+    rows in order. Already-filled cells are skipped silently (no
+    overwrite, identical policy to write_ledger_cube). None source
+    values are also skipped (so missing readings don't blank existing
+    data). Flags `write_7d` / `write_28d` skip an entire age group if
+    False.
+    """
+    wrote: list[dict] = []
+    errors: list[str] = []
+    skipped: list[str] = []
+
+    rows_7d = block.get("rows_7d", [])
+    rows_28d = block.get("rows_28d", [])
+    start = block["start_row"]
+
+    def _write(cell: str, val):
+        if val is None or val == "":
+            return
+        try:
+            cur = ws.Range(cell).Value
+            if not _is_empty(cur):
+                skipped.append(cell)
+                return
+            ws.Range(cell).Value = float(val) if isinstance(val, str) else val
+            wrote.append({"cell": cell, "value": val})
+        except Exception as e:
+            errors.append(f"{cell}: {e}")
+
+    def _walk(tests, rows):
+        for t, row in zip(tests, rows):
+            _write(f"L{row}", t.get("core_diameter_mm"))
+            _write(f"M{row}", t.get("core_height_mm"))
+            _write(f"N{row}", t.get("weight_gr"))
+            _write(f"O{row}", t.get("load_kn"))
+
+    if write_7d:
+        _walk(cube.get("tests_7d", []), rows_7d)
+    if write_28d:
+        _walk(cube.get("tests_28d", []), rows_28d)
+
+    if wrote:
+        try:
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            mark = cube.get("sample_mark", "?")
+            lines = [
+                f"[{ts}] [SHOT-LEDGER] {mark} -> rows {start}-{block['end_row']}"
+            ]
+            for entry in wrote:
+                lines.append(f"  {entry['cell']} = {entry['value']}")
+            with open(LOG_PATH, "a", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+        except Exception as e:
+            print(f"shotcrete ledger write_log failed: {e}", file=sys.stderr)
+
+    return {"wrote": wrote, "errors": errors, "skipped": skipped}
+
+
 if __name__ == "__main__":
     # Quick test: list open sheets
     print("Open sheets:")
