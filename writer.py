@@ -646,6 +646,89 @@ def read_ledger_blocks(ws) -> list[dict]:
     return blocks
 
 
+def read_shotcrete_ledger_blocks(ws) -> list[dict]:
+    """
+    Shotcrete sibling of read_ledger_blocks. Scans columns A:K from row 8
+    downward; identifies blocks by B-filled rows; collects 7-day and
+    28-day row numbers from column K (Age). Empty K rows ("WP", blank,
+    or other text) are ignored. Block size = 5x7d + 5x28d for a single
+    set, 10x7d + 10x28d for a two-set sample.
+    Returns [{sample_key, sample_id_num, sample_mark_raw, cube_no,
+              cube_no_raw, start_row, end_row, size, rows_7d, rows_28d}, ...].
+    """
+    try:
+        used = ws.UsedRange
+        last_row = int(used.Row) + int(used.Rows.Count) - 1
+    except Exception:
+        last_row = LEDGER_MAX_SCAN_ROWS
+    last_row = min(last_row, LEDGER_MAX_SCAN_ROWS)
+    if last_row < 8:
+        return []
+
+    # A=0, B=1, ..., K=10
+    data = ws.Range(f"A8:K{last_row}").Value
+    if data is None:
+        return []
+    if not isinstance(data[0], tuple):
+        data = (data,)
+
+    # Trim trailing fully-empty rows
+    last_idx = -1
+    for i, row in enumerate(data):
+        if not all(_is_empty(v) for v in row):
+            last_idx = i
+    if last_idx < 0:
+        return []
+    data = data[: last_idx + 1]
+
+    head_indices = [i for i, row in enumerate(data) if not _is_empty(row[1])]
+    blocks: list[dict] = []
+    for j, hi in enumerate(head_indices):
+        start = 8 + hi
+        prov_end_idx = (
+            head_indices[j + 1] - 1 if j + 1 < len(head_indices)
+            else len(data) - 1
+        )
+        rows_7d: list[int] = []
+        rows_28d: list[int] = []
+        actual_end_idx = hi
+        for k in range(hi, prov_end_idx + 1):
+            age_val = data[k][10]  # column K
+            if _is_empty(age_val):
+                continue
+            try:
+                age_int = int(age_val)
+            except (TypeError, ValueError):
+                # "WP" or other text — skip but still extend block end
+                actual_end_idx = k
+                continue
+            if age_int == 7:
+                rows_7d.append(8 + k)
+                actual_end_idx = k
+            elif age_int == 28:
+                rows_28d.append(8 + k)
+                actual_end_idx = k
+            else:
+                actual_end_idx = k
+
+        end = 8 + actual_end_idx
+        raw = data[hi][1]
+        cube_no_raw = data[hi][0]
+        blocks.append({
+            "sample_key": ledger_sample_key(raw),
+            "sample_id_num": normalize_sample_mark(raw),
+            "sample_mark_raw": raw,
+            "cube_no": normalize_cube_no(cube_no_raw),
+            "cube_no_raw": cube_no_raw,
+            "start_row": start,
+            "end_row": end,
+            "size": end - start + 1,
+            "rows_7d": rows_7d,
+            "rows_28d": rows_28d,
+        })
+    return blocks
+
+
 def read_ledger_values(ws, blocks: list[dict]) -> dict:
     """
     Read current M (weight) and N (load) values for the rows covered by
