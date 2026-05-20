@@ -65,6 +65,10 @@ def _fake_values(ws, blocks):
         if b["sample_id_num"] == 525:
             ws_w = [4500.0, 4520.0, 4480.0, None, None, None]
             ws_l = [320.0, 325.0, 318.0, None, None, None]
+        # 522 → ALL filled in ledger → "done" card (hidden by default)
+        elif b["sample_id_num"] == 522:
+            ws_w = [4400.0, 4410, 4420, 4500, 4510, 4520]
+            ws_l = [310, 312, 314, 820, 825, 830]
         else:
             ws_w = [None] * n
             ws_l = [None] * n
@@ -126,6 +130,22 @@ CUBES = {
                 {"weight_gr": 8540, "load_kn": 852.0},
             ],
         },
+        # --- These three cubes have no matching block → "not found" toggle test
+        {
+            "sample_mark": "G26-CON-901", "cube_no": 700,
+            "tests_7d": [{"weight_gr": 8000, "load_kn": 500.0}],
+            "tests_28d": [],
+        },
+        {
+            "sample_mark": "G26-CON-902", "cube_no": 701,
+            "tests_7d": [{"weight_gr": 8010, "load_kn": 502.0}],
+            "tests_28d": [],
+        },
+        {
+            "sample_mark": "G26-CON-903", "cube_no": 702,
+            "tests_7d": [{"weight_gr": 8020, "load_kn": 504.0}],
+            "tests_28d": [],
+        },
     ]
 }
 
@@ -146,10 +166,12 @@ writer.merge_cubes_for_ledger = _fake_merge
 
 def _fake_match(merged, blocks):
     by_key = {b["sample_key"]: b for b in blocks}
-    return [
-        {"cube": c, "block": by_key.get(c["sample_key"]), "mismatch_reason": None}
-        for c in merged
-    ]
+    results = []
+    for c in merged:
+        block = by_key.get(c["sample_key"])
+        reason = None if block is not None else "not_found"
+        results.append({"cube": c, "block": block, "mismatch_reason": reason})
+    return results
 
 
 writer.match_cubes_to_blocks = _fake_match

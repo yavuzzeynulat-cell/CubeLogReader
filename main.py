@@ -417,6 +417,30 @@ def _is_none_or_empty(v) -> bool:
     return False
 
 
+def _entry_target_cells_all_filled(entry, value_arrays: list) -> bool:
+    """Return True iff every target cell for this entry is already
+    non-empty in the ledger. `value_arrays` is a list of the existing-
+    value lists (one per write column — 2 for concrete, 4 for
+    shotcrete). Each is indexed by `row_no - block_start`. Mismatch
+    cubes always return False (they remain visible)."""
+    if entry.get("mismatch"):
+        return False
+    block = entry.get("block") or {}
+    block_start = block.get("start_row")
+    if block_start is None:
+        return False
+    all_rows = list(block.get("rows_7d", [])) + list(block.get("rows_28d", []))
+    if not all_rows:
+        return False
+    for row_no in all_rows:
+        off = row_no - block_start
+        for arr in value_arrays:
+            if 0 <= off < len(arr):
+                if _is_none_or_empty(arr[off]):
+                    return False
+    return True
+
+
 def _collect_ledger_debug(window, mode: str) -> str:
     """Multi-line snapshot of a ledger window's state for support."""
     lines = ["=" * 60, f"{mode} Ledger Debug", "=" * 60]
@@ -476,7 +500,13 @@ def _collect_ledger_debug(window, mode: str) -> str:
     lines.append("")
     lines.append(f"--- not_found ({len(not_found)}) ---")
     for nf in not_found:
-        lines.append(f"   {nf!r}")
+        if isinstance(nf, dict):
+            lines.append(
+                f"   mark={nf.get('sample_mark')!r:24} "
+                f"cube_no={nf.get('cube_no')!r:>8}"
+            )
+        else:
+            lines.append(f"   {nf!r}")
 
     return "\n".join(lines)
 
@@ -1918,25 +1948,29 @@ class LedgerPreviewWindow:
             pass
 
         entries: list[dict] = []
-        not_found: list[str] = []
+        not_found: list[dict] = []   # full cube dicts so we can render mini cards
         block_idx_by_id = {id(b): i for i, b in enumerate(blocks)}
         for m in matches:
             cube = m["cube"]
             block = m["block"]
             reason = m["mismatch_reason"]
             if block is None:
-                not_found.append(cube.get("sample_mark", "?"))
+                not_found.append(cube)
                 continue
             bi = block_idx_by_id[id(block)]
             vals = values.get(bi, {"weights": [], "loads": []})
-            entries.append({
+            entry = {
                 "cube": cube,
                 "block": block,
                 "mismatch": reason,
                 "weights_ledger": vals["weights"],
                 "loads_ledger": vals["loads"],
                 "enabled": BooleanVar(value=reason is None),
-            })
+            }
+            entry["fully_complete"] = _entry_target_cells_all_filled(
+                entry, [vals["weights"], vals["loads"]],
+            )
+            entries.append(entry)
 
         # Commit — only reached when the COM reads succeeded.
         self.ledger_error = None
@@ -2154,52 +2188,119 @@ class LedgerPreviewWindow:
             font=ctk.CTkFont(size=11),
         ).pack(side="left")
 
-        if self.not_found:
+        # Partition entries into actionable vs already-done.
+        done_entries = [
+            e for e in self.entries
+            if not e.get("mismatch") and e.get("fully_complete")
+        ]
+        actionable = [e for e in self.entries if e not in done_entries]
+        hidden_total = len(done_entries) + len(self.not_found)
+
+        if hidden_total > 0:
             arrow = "▾" if self._notfound_visible else "▸"
+            parts = []
+            if done_entries:
+                parts.append(f"{len(done_entries)} done")
+            if self.not_found:
+                parts.append(f"{len(self.not_found)} not found")
+            label = f"{arrow}  {hidden_total} hidden ({', '.join(parts)})"
             ctk.CTkButton(
-                legend,
-                text=f"{arrow}  {len(self.not_found)} not found",
-                width=130, height=24,
+                legend, text=label,
+                width=220, height=24,
                 font=ctk.CTkFont(size=11, weight="bold"),
                 fg_color="#7B1818", hover_color="#5C1010",
                 text_color="#FF8A80",
                 command=self._toggle_notfound,
             ).pack(side="right")
 
-        if self.not_found and self._notfound_visible:
-            banner = ctk.CTkFrame(
-                body, corner_radius=8, border_width=2,
-                border_color="#C62828", fg_color="#2a1010",
-            )
-            banner.pack(fill="x", pady=(4, 10))
-            joined = ", ".join(self.not_found)
-            ctk.CTkLabel(
-                banner,
-                text=f"⚠ {len(self.not_found)} cubes not found in ledger: {joined}",
-                text_color="#FF8A80",
-                font=ctk.CTkFont(size=12, weight="bold"),
-                anchor="w", justify="left", wraplength=1100,
-            ).pack(fill="x", padx=12, pady=8)
-
         # Scrollable card area
         scroll = ctk.CTkScrollableFrame(body, fg_color="transparent")
         scroll.pack(fill="both", expand=True)
         self._cube_list = scroll
 
-        for entry in self.entries:
+        # Main cards: actionable + mismatch
+        for entry in actionable:
             self._build_card(scroll, entry)
+
+        # Hidden group: done + not-found, only when toggle is on
+        if self._notfound_visible:
+            if done_entries:
+                ctk.CTkLabel(
+                    scroll, text="── Already filled in ledger ──",
+                    text_color="gray50",
+                    font=ctk.CTkFont(size=12, weight="bold"),
+                ).pack(pady=(20, 6))
+                for entry in done_entries:
+                    self._build_done_card(scroll, entry)
+            if self.not_found:
+                ctk.CTkLabel(
+                    scroll, text="── Not found in ledger ──",
+                    text_color="#FF8A80",
+                    font=ctk.CTkFont(size=12, weight="bold"),
+                ).pack(pady=(20, 6))
+                for cube in self.not_found:
+                    self._build_notfound_card(scroll, cube)
 
         # Arrow-key navigation between cards
         self.win.bind("<Down>", self._on_card_down)
         self.win.bind("<Up>", self._on_card_up)
 
-        if not self.entries and not self.not_found:
+        if not actionable and not done_entries and not self.not_found:
             ctk.CTkLabel(
                 body,
                 text="No normal cubes to write (shotcrete filtered out).",
                 text_color="gray55",
                 font=self._entry_font,
             ).pack(pady=20)
+
+    def _build_done_card(self, parent, entry):
+        cube = entry["cube"]
+        block = entry["block"]
+        card = ctk.CTkFrame(
+            parent, corner_radius=10, border_width=1,
+            border_color="gray40", fg_color=("gray85", "gray20"),
+        )
+        card.pack(fill="x", padx=8, pady=4)
+        row = ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(fill="x", padx=15, pady=8)
+        row.grid_columnconfigure(0, weight=1)
+        row.grid_columnconfigure(1, weight=0)
+        title = (
+            f"Cube No {cube.get('cube_no', '?')}  ·  "
+            f"{cube.get('sample_mark', '?')}  ·  "
+            f"rows {block['start_row']}-{block['end_row']}"
+        )
+        ctk.CTkLabel(
+            row, text=title, font=self._entry_font, text_color="gray60",
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(
+            row, text="[DONE]", font=self._pill_font,
+            text_color="white", fg_color="gray40",
+            corner_radius=8, padx=10, pady=2,
+        ).grid(row=0, column=1, sticky="e")
+
+    def _build_notfound_card(self, parent, cube):
+        card = ctk.CTkFrame(
+            parent, corner_radius=10, border_width=1,
+            border_color="#7B1818", fg_color="#2a1010",
+        )
+        card.pack(fill="x", padx=8, pady=4)
+        row = ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(fill="x", padx=15, pady=8)
+        row.grid_columnconfigure(0, weight=1)
+        row.grid_columnconfigure(1, weight=0)
+        title = (
+            f"Cube No {cube.get('cube_no', '?')}  ·  "
+            f"{cube.get('sample_mark', '?')}"
+        )
+        ctk.CTkLabel(
+            row, text=title, font=self._entry_font, text_color="#FF8A80",
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(
+            row, text="[NOT FOUND]", font=self._pill_font,
+            text_color="white", fg_color=PILL_NO_COLOR,
+            corner_radius=8, padx=10, pady=2,
+        ).grid(row=0, column=1, sticky="e")
 
     def _build_card(self, parent, entry: dict):
         cube = entry["cube"]
@@ -2671,19 +2772,19 @@ class ShotcreteLedgerPreviewWindow:
             pass
 
         entries: list[dict] = []
-        not_found: list[str] = []
+        not_found: list[dict] = []  # full cube dicts so we can render mini cards
         block_idx_by_id = {id(b): i for i, b in enumerate(blocks)}
         for m in matches:
             cube = m["cube"]
             block = m["block"]
             reason = m["mismatch_reason"]
             if block is None:
-                not_found.append(cube.get("sample_mark", "?"))
+                not_found.append(cube)
                 continue
             bi = block_idx_by_id[id(block)]
             vals = values.get(bi, {"diameters": [], "heights": [],
                                    "weights": [], "loads": []})
-            entries.append({
+            entry = {
                 "cube": cube,
                 "block": block,
                 "mismatch": reason,
@@ -2692,7 +2793,13 @@ class ShotcreteLedgerPreviewWindow:
                 "weights_ledger":   vals["weights"],
                 "loads_ledger":     vals["loads"],
                 "enabled": BooleanVar(value=reason is None),
-            })
+            }
+            entry["fully_complete"] = _entry_target_cells_all_filled(
+                entry,
+                [vals["diameters"], vals["heights"],
+                 vals["weights"], vals["loads"]],
+            )
+            entries.append(entry)
 
         self.ledger_error = None
         self.wb_name = wb_name
@@ -2855,51 +2962,115 @@ class ShotcreteLedgerPreviewWindow:
             font=ctk.CTkFont(size=11),
         ).pack(side="left")
 
-        if self.not_found:
+        # Partition entries into actionable vs already-done.
+        done_entries = [
+            e for e in self.entries
+            if not e.get("mismatch") and e.get("fully_complete")
+        ]
+        actionable = [e for e in self.entries if e not in done_entries]
+        hidden_total = len(done_entries) + len(self.not_found)
+
+        if hidden_total > 0:
             arrow = "▾" if self._notfound_visible else "▸"
+            parts = []
+            if done_entries:
+                parts.append(f"{len(done_entries)} done")
+            if self.not_found:
+                parts.append(f"{len(self.not_found)} not found")
+            label = f"{arrow}  {hidden_total} hidden ({', '.join(parts)})"
             ctk.CTkButton(
-                legend,
-                text=f"{arrow}  {len(self.not_found)} not found",
-                width=130, height=24,
+                legend, text=label,
+                width=220, height=24,
                 font=ctk.CTkFont(size=11, weight="bold"),
                 fg_color="#7B1818", hover_color="#5C1010",
                 text_color="#FF8A80",
                 command=self._toggle_notfound,
             ).pack(side="right")
 
-        if self.not_found and self._notfound_visible:
-            banner = ctk.CTkFrame(
-                body, corner_radius=8, border_width=2,
-                border_color="#C62828", fg_color="#2a1010",
-            )
-            banner.pack(fill="x", pady=(4, 10))
-            joined = ", ".join(self.not_found)
-            ctk.CTkLabel(
-                banner,
-                text=f"⚠ {len(self.not_found)} shotcrete cubes not found in ledger: {joined}",
-                text_color="#FF8A80",
-                font=ctk.CTkFont(size=12, weight="bold"),
-                anchor="w", justify="left", wraplength=1100,
-            ).pack(fill="x", padx=12, pady=8)
-
         scroll = ctk.CTkScrollableFrame(body, fg_color="transparent")
         scroll.pack(fill="both", expand=True)
         self._cube_list = scroll
 
-        for entry in self.entries:
+        for entry in actionable:
             self._build_card(scroll, entry)
 
-        # Arrow-key card navigation
+        if self._notfound_visible:
+            if done_entries:
+                ctk.CTkLabel(
+                    scroll, text="── Already filled in ledger ──",
+                    text_color="gray50",
+                    font=ctk.CTkFont(size=12, weight="bold"),
+                ).pack(pady=(20, 6))
+                for entry in done_entries:
+                    self._build_done_card(scroll, entry)
+            if self.not_found:
+                ctk.CTkLabel(
+                    scroll, text="── Not found in ledger ──",
+                    text_color="#FF8A80",
+                    font=ctk.CTkFont(size=12, weight="bold"),
+                ).pack(pady=(20, 6))
+                for cube in self.not_found:
+                    self._build_notfound_card(scroll, cube)
+
         self.win.bind("<Down>", self._on_card_down)
         self.win.bind("<Up>", self._on_card_up)
 
-        if not self.entries and not self.not_found:
+        if not actionable and not done_entries and not self.not_found:
             ctk.CTkLabel(
                 body,
                 text="No shotcrete cubes to write.",
                 text_color="gray55",
                 font=self._entry_font,
             ).pack(pady=20)
+
+    def _build_done_card(self, parent, entry):
+        cube = entry["cube"]
+        block = entry["block"]
+        card = ctk.CTkFrame(
+            parent, corner_radius=10, border_width=1,
+            border_color="gray40", fg_color=("gray85", "gray20"),
+        )
+        card.pack(fill="x", padx=8, pady=4)
+        row = ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(fill="x", padx=15, pady=8)
+        row.grid_columnconfigure(0, weight=1)
+        row.grid_columnconfigure(1, weight=0)
+        title = (
+            f"Core No {cube.get('cube_no', '?')}  ·  "
+            f"{cube.get('sample_mark', '?')}  ·  "
+            f"rows {block['start_row']}-{block['end_row']}"
+        )
+        ctk.CTkLabel(
+            row, text=title, font=self._entry_font, text_color="gray60",
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(
+            row, text="[DONE]", font=self._pill_font,
+            text_color="white", fg_color="gray40",
+            corner_radius=8, padx=10, pady=2,
+        ).grid(row=0, column=1, sticky="e")
+
+    def _build_notfound_card(self, parent, cube):
+        card = ctk.CTkFrame(
+            parent, corner_radius=10, border_width=1,
+            border_color="#7B1818", fg_color="#2a1010",
+        )
+        card.pack(fill="x", padx=8, pady=4)
+        row = ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(fill="x", padx=15, pady=8)
+        row.grid_columnconfigure(0, weight=1)
+        row.grid_columnconfigure(1, weight=0)
+        title = (
+            f"Core No {cube.get('cube_no', '?')}  ·  "
+            f"{cube.get('sample_mark', '?')}"
+        )
+        ctk.CTkLabel(
+            row, text=title, font=self._entry_font, text_color="#FF8A80",
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(
+            row, text="[NOT FOUND]", font=self._pill_font,
+            text_color="white", fg_color=PILL_NO_COLOR,
+            corner_radius=8, padx=10, pady=2,
+        ).grid(row=0, column=1, sticky="e")
 
     def _build_card(self, parent, entry: dict):
         cube = entry["cube"]
