@@ -553,15 +553,12 @@ def _fix_known_ocr_misreads(data: dict) -> dict:
 
 
 def _postprocess_cubes(data: dict) -> dict:
-    """OCR misread fix → hallucination-drop → empty-row clean →
-    shotcrete top-3 → multi-set split."""
+    """Hallucination-drop → empty-row clean → shotcrete top-3 →
+    multi-set split. Sample-mark OCR fixes happen at MATCH time in
+    writer.match_cubes_to_blocks (fallback only, year-agnostic)."""
     return _split_multi_set_cubes(
         _process_shotcrete_cubes(
-            _clean_empty_rows(
-                _drop_hallucinated_groups(
-                    _fix_known_ocr_misreads(data)
-                )
-            )
+            _clean_empty_rows(_drop_hallucinated_groups(data))
         )
     )
 

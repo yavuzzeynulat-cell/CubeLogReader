@@ -486,12 +486,23 @@ def ledger_sample_key(mark) -> str | None:
         return None
     num = int(m.group(1))
     prefix = s[: m.start()].rstrip("- ").upper()
-    # Known Gemini OCR misread: handwritten "G" at the start of a prefix is
-    # often read as the digit "6", producing "626-CON-NNN" where the real
-    # mark is "G26-CON-NNN". Normalize so the ledger match still works.
-    if prefix.startswith("626-") or prefix == "626":
-        prefix = "G26" + prefix[3:]
     return f"{prefix}-{num}" if prefix else str(num)
+
+
+def _ocr_fixed_sample_key(key):
+    """Year-agnostic Gemini OCR fallback for sample keys.
+
+    Gemini consistently misreads a handwritten "G" at the start of the
+    project prefix as the digit "6", so "G26-..." comes back as "626-..."
+    today and "G27-..." will come back as "627-..." next year.
+    If `key` matches the pattern <digit "6"><two digits><hyphen>... at
+    the very start, return the variant with the leading "6" replaced
+    by "G"; otherwise return None.
+    """
+    if not isinstance(key, str):
+        return None
+    new = re.sub(r"^6(\d\d-)", r"G\1", key)
+    return new if new != key else None
 
 
 def find_ledger_candidates():
@@ -879,8 +890,15 @@ def merge_shotcrete_cubes_for_ledger(cubes_data: dict) -> list[dict]:
     Returns a list of {sample_key, sample_id_num, sample_mark, cube_no,
     tests_7d, tests_28d}.
     """
-    by_num: dict = {}
-    order: list = []
+    # Dedupe by (sample_key, cube_no, set_idx). When the user drag-drops
+    # the same shotcrete page twice in a batch, the cubes show up twice
+    # in cubes_data — once enabled and once with `_card_enabled=False`
+    # (the user typically unticks the dup). Since the ledger pass no
+    # longer filters by _card_enabled, those duplicates would otherwise
+    # concatenate into 10x7d + 10x28d against a 5+5 block. Pick the
+    # enabled copy when both exist.
+    best_by_triple: dict = {}
+    triple_order: list = []
     for cube in cubes_data.get("cubes", []):
         if not cube.get("_shotcrete"):
             continue
@@ -889,6 +907,22 @@ def merge_shotcrete_cubes_for_ledger(cubes_data: dict) -> list[dict]:
             continue
         cube_no = normalize_cube_no(cube.get("cube_no"))
         set_idx = cube.get("_set_index") or 1
+        triple = (key, cube_no, set_idx)
+        existing = best_by_triple.get(triple)
+        if existing is None:
+            best_by_triple[triple] = cube
+            triple_order.append(triple)
+            continue
+        # Prefer a copy that the user did NOT explicitly disable.
+        if (existing.get("_card_enabled") is False
+                and cube.get("_card_enabled") is not False):
+            best_by_triple[triple] = cube
+
+    by_num: dict = {}
+    order: list = []
+    for triple in triple_order:
+        cube = best_by_triple[triple]
+        key, cube_no, set_idx = triple
         merge_key = (key, cube_no)
         if merge_key not in by_num:
             by_num[merge_key] = {
@@ -953,9 +987,15 @@ def match_cubes_to_blocks(
         key = cube.get("sample_key")
         cn = cube.get("cube_no")
         block = by_pair.get((key, cn))
-        # Fallback: if no exact (key, cube_no) match but key matches uniquely,
-        # accept it but flag as warning so user notices.
+        # First fallback: known Gemini OCR misread (leading "6XX-" should
+        # be "GXX-"). Only triggered when the original key didn't match,
+        # so correct readings are never disturbed.
         cube_no_warn = None
+        if block is None:
+            alt = _ocr_fixed_sample_key(key)
+            if alt is not None:
+                block = by_pair.get((alt, cn)) or by_key_only.get(alt)
+        # Second fallback: key-only (allow cube-no mismatch but warn).
         if block is None:
             block = by_key_only.get(key)
             if block is not None and cn is not None and block.get("cube_no") is not None:
