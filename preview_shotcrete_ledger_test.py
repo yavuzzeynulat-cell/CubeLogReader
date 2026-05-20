@@ -1,8 +1,11 @@
-"""Quick visual test for ShotcreteLedgerPreviewWindow — no Excel needed.
+"""Visual test for ShotcreteLedgerPreviewWindow — real-world scenario.
 
-Two fake open ledgers exercise the file-selector dropdown.
-Four fake blocks cover: single 5+5 (clean), 5+5 with 7-day pre-filled,
-two-set 10+10 interleaved, and an odd-count 4+3."""
+PDF: 28days 20.05.2026.pdf (4 cubes, all shotcrete).
+Excel state simulated below — only G26-CON-599 should be visible at
+the top (7-day already in Excel → 7-day group OFF, 28-day empty →
+28-day group ON). The other three (602, 624, 646) are hidden behind
+the toggle: 602 + 646 as "done" (Excel fully filled), 624 as "not
+found" (no matching block)."""
 import customtkinter as ctk
 import main
 import writer
@@ -18,58 +21,57 @@ class _FakeWS:
 def _fake_find_candidates(*a, **k):
     return [
         (None, _FakeWS(), "Shotcrete sample form.xlsx", "Shotcrete Concrete Results"),
-        (None, _FakeWS(), "Shotcrete sample form APRIL.xlsx", "Shotcrete Concrete Results"),
     ]
 
 
 def _fake_blocks(ws):
-    # NOTE: sample_key must match what ledger_sample_key() produces on the
-    # cube's sample_mark — leading zeros are stripped to integers, e.g.
-    # "G26-CON-027" → "G26-CON-27".
     return [
-        {  # 027 — clean 5+5
-            "sample_key": "G26-CON-27", "sample_id_num": 27,
-            "sample_mark_raw": "G26-CON-027", "cube_no": 2, "cube_no_raw": 2,
-            "start_row": 2309, "end_row": 2318, "size": 10,
-            "rows_7d":  [2309, 2310, 2311, 2312, 2313],
-            "rows_28d": [2314, 2315, 2316, 2317, 2318],
+        {  # 599 — 5+5, 7-day already filled in Excel, 28-day empty
+            "sample_key": "G26-CON-599", "sample_id_num": 599,
+            "sample_mark_raw": "G26-CON-599", "cube_no": 41, "cube_no_raw": 41,
+            "start_row": 2693, "end_row": 2702, "size": 10,
+            "rows_7d":  [2693, 2694, 2695, 2696, 2697],
+            "rows_28d": [2698, 2699, 2700, 2701, 2702],
         },
-        {  # 082 — 7-day pre-filled in ledger (gray cells)
-            "sample_key": "G26-CON-82", "sample_id_num": 82,
-            "sample_mark_raw": "G26-CON-082", "cube_no": 3, "cube_no_raw": 3,
-            "start_row": 2319, "end_row": 2328, "size": 10,
-            "rows_7d":  [2319, 2320, 2321, 2322, 2323],
-            "rows_28d": [2324, 2325, 2326, 2327, 2328],
+        {  # 602 — 5+5, Excel fully filled (will be hidden as DONE)
+            "sample_key": "G26-CON-602", "sample_id_num": 602,
+            "sample_mark_raw": "G26-CON-602", "cube_no": 42, "cube_no_raw": 42,
+            "start_row": 2703, "end_row": 2712, "size": 10,
+            "rows_7d":  [2703, 2704, 2705, 2706, 2707],
+            "rows_28d": [2708, 2709, 2710, 2711, 2712],
         },
-        {  # 200 — two-set: 10+10 interleaved across 20 rows
-            "sample_key": "G26-CON-200", "sample_id_num": 200,
-            "sample_mark_raw": "G26-CON-200", "cube_no": 5, "cube_no_raw": 5,
-            "start_row": 2340, "end_row": 2359, "size": 20,
-            "rows_7d":  [2340, 2341, 2342, 2343, 2344,
-                         2350, 2351, 2352, 2353, 2354],
-            "rows_28d": [2345, 2346, 2347, 2348, 2349,
-                         2355, 2356, 2357, 2358, 2359],
-        },
-        {  # 333 — odd 4+3 block (partial data scenario)
-            "sample_key": "G26-CON-333", "sample_id_num": 333,
-            "sample_mark_raw": "G26-CON-333", "cube_no": 7, "cube_no_raw": 7,
-            "start_row": 2370, "end_row": 2376, "size": 7,
-            "rows_7d":  [2370, 2371, 2372, 2373],
-            "rows_28d": [2374, 2375, 2376],
+        # 624 → INTENTIONALLY ABSENT — cube has no matching block
+        {  # 646 — 3+3, Excel fully filled (will be hidden as DONE)
+            "sample_key": "G26-CON-646", "sample_id_num": 646,
+            "sample_mark_raw": "G26-CON-646", "cube_no": 44, "cube_no_raw": 44,
+            "start_row": 2719, "end_row": 2724, "size": 6,
+            "rows_7d":  [2719, 2720, 2721],
+            "rows_28d": [2722, 2723, 2724],
         },
     ]
 
 
 def _fake_values(ws, blocks):
+    """Excel state simulation:
+      599 → 7-day filled, 28-day empty
+      602 → fully filled (done)
+      646 → fully filled (done)"""
     out = {}
     for i, b in enumerate(blocks):
         n = b["size"]
-        # 082 → 7-day rows already filled (gray rendering)
-        if b["sample_id_num"] == 82:
-            di = [94.0, 94.5, 94.8, 95.0, 95.3] + [None] * (n - 5)
-            he = [94.1, 94.6, 94.9, 95.1, 95.4] + [None] * (n - 5)
-            we = [1500.0, 1510, 1520, 1530, 1540] + [None] * (n - 5)
-            lo = [200.0, 210, 220, 230, 240] + [None] * (n - 5)
+        sid = b["sample_id_num"]
+        if sid == 599:
+            # 7-day filled (5 rows), 28-day empty (5 rows)
+            di = [94.0, 94.0, 94.0, 94.0, 94.0] + [None] * 5
+            he = [95.77, 95.67, 95.90, 96.29, 95.91] + [None] * 5
+            we = [1501.0, 1500, 1498, 1500, 1494] + [None] * 5
+            lo = [205.32, 189.58, 200.48, 191.47, 190.82] + [None] * 5
+        elif sid in (602, 646):
+            # Fully filled across all rows + all 4 columns
+            di = [94.0] * n
+            he = [96.0 + i * 0.1 for i in range(n)]
+            we = [1530.0 + i for i in range(n)]
+            lo = [240.0 + i for i in range(n)]
         else:
             di = [None] * n
             he = [None] * n
@@ -84,37 +86,63 @@ writer.read_shotcrete_ledger_blocks = _fake_blocks
 writer.read_shotcrete_ledger_values = _fake_values
 
 
-def _shot_tests(n7, n28, base_w=1500, base_l=220, base_d=94.0, base_h=94.0):
+def _shot_tests_full(base_w, base_l, base_d=94.0, base_h=95.5):
+    """5 specimens at age 7 + 5 specimens at age 28, all values present."""
     out = []
-    for i in range(n7):
+    for i in range(5):
         out.append({
-            "age_days": 7, "weight_gr": base_w + i,
-            "load_kn": base_l + i, "core_diameter_mm": base_d + i * 0.1,
-            "core_height_mm": base_h + i * 0.1, "strength_nmm2": 30 + i,
+            "age_days": 7,
+            "weight_gr": base_w + i,
+            "load_kn": base_l + i,
+            "core_diameter_mm": base_d,
+            "core_height_mm": base_h + i * 0.1,
+            "strength_nmm2": 30 + i,
             "_selected": i < 3,
         })
-    for i in range(n28):
+    for i in range(5):
         out.append({
-            "age_days": 28, "weight_gr": base_w + 50 + i,
-            "load_kn": base_l + 50 + i, "core_diameter_mm": base_d + 1 + i * 0.1,
-            "core_height_mm": base_h + 1 + i * 0.1, "strength_nmm2": 40 + i,
+            "age_days": 28,
+            "weight_gr": base_w + 20 + i,
+            "load_kn": base_l + 50 + i,
+            "core_diameter_mm": base_d,
+            "core_height_mm": base_h + 0.5 + i * 0.1,
+            "strength_nmm2": 35 + i,
             "_selected": i < 3,
         })
     return out
 
 
+def _shot_tests_7day_only(base_w, base_l, n=3, base_d=150.0, base_h=150.0):
+    """Larger-core scenario (e.g. 150x150 mm) — only 7-day specimens."""
+    out = []
+    for i in range(n):
+        out.append({
+            "age_days": 7,
+            "weight_gr": base_w + i,
+            "load_kn": base_l + i,
+            "core_diameter_mm": base_d,
+            "core_height_mm": base_h,
+            "strength_nmm2": 39 + i,
+            "_selected": True,
+        })
+    return out
+
+
+# Cubes from the real PDF "28days 20.05.2026.pdf":
 CUBES = {
     "cubes": [
-        {"sample_mark": "G26-CON-027", "cube_no": 2, "_shotcrete": True,
-         "tests": _shot_tests(5, 5)},
-        {"sample_mark": "G26-CON-082", "cube_no": 3, "_shotcrete": True,
-         "tests": _shot_tests(5, 5, base_w=1550, base_l=230)},
-        {"sample_mark": "G26-CON-200", "cube_no": 5, "_shotcrete": True,
-         "_set_index": 1, "tests": _shot_tests(5, 5, base_w=1600)},
-        {"sample_mark": "G26-CON-200", "cube_no": 5, "_shotcrete": True,
-         "_set_index": 2, "tests": _shot_tests(5, 5, base_w=1620)},
-        {"sample_mark": "G26-CON-333", "cube_no": 7, "_shotcrete": True,
-         "tests": _shot_tests(4, 3, base_w=1700)},
+        # 041 — G26-CON-599 (the one we want to write today)
+        {"sample_mark": "G26-CON-599", "cube_no": 41, "_shotcrete": True,
+         "tests": _shot_tests_full(1494, 189.58)},
+        # 042 — G26-CON-602 (Excel already fully filled → DONE)
+        {"sample_mark": "G26-CON-602", "cube_no": 42, "_shotcrete": True,
+         "tests": _shot_tests_full(1518, 229.81)},
+        # 043 — G26-CON-624 (no matching block → NOT FOUND)
+        {"sample_mark": "G26-CON-624", "cube_no": 43, "_shotcrete": True,
+         "tests": _shot_tests_7day_only(7752, 865.96)},
+        # 044 — G26-CON-646 (Excel already fully filled → DONE)
+        {"sample_mark": "G26-CON-646", "cube_no": 44, "_shotcrete": True,
+         "tests": _shot_tests_7day_only(7808, 914.62)},
     ]
 }
 
@@ -122,7 +150,10 @@ CUBES = {
 root = ctk.CTk()
 root.geometry("400x100")
 root.title("Shotcrete ledger test parent")
-ctk.CTkLabel(root, text="ShotcreteLedgerPreviewWindow test").pack(pady=20)
+ctk.CTkLabel(
+    root,
+    text="ShotcreteLedgerPreviewWindow — 599 visible, others hidden",
+).pack(pady=20)
 
 main.ShotcreteLedgerPreviewWindow(root, CUBES)
 

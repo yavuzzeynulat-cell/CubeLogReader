@@ -3125,6 +3125,7 @@ class ShotcreteLedgerPreviewWindow:
             )
 
             any_will_write = False
+            group_has_existing_data = False
             for i in range(n_rows):
                 row_no = start_row + i
                 t = tests[i] if i < len(tests) else {}
@@ -3148,6 +3149,8 @@ class ShotcreteLedgerPreviewWindow:
                     zip(cell_values, existing), start=1,
                 ):
                     empty = _is_none_or_empty(ex)
+                    if not empty:
+                        group_has_existing_data = True
                     if val is not None and empty:
                         any_will_write = True
                     var = StringVar(value="" if val is None else str(val))
@@ -3171,8 +3174,15 @@ class ShotcreteLedgerPreviewWindow:
                 out_w.append(cell_widgets[2])
                 out_l.append(cell_widgets[3])
 
-            # Per-group checkbox on the right, spanning the whole group.
-            group_var = BooleanVar(value=any_will_write and not bad)
+            # Per-group checkbox: default ON only if the group is
+            # completely untouched in the ledger AND has writable cells.
+            # If any cell in the group is already filled, the user is
+            # likely past this group (e.g. wrote 7-day last week, doing
+            # 28-day today) — leave it OFF so we don't surprise them.
+            group_var = BooleanVar(
+                value=any_will_write and not group_has_existing_data
+                and not bad,
+            )
             group_chk = ctk.CTkCheckBox(
                 grid, text="", variable=group_var, width=24,
             )
