@@ -528,11 +528,40 @@ def clear_gemini_cache() -> int:
     return removed
 
 
+def _fix_known_ocr_misreads(data: dict) -> dict:
+    """Normalize cube sample marks that Gemini consistently misreads.
+
+    Known pattern: a handwritten "G" at the start of the project prefix
+    ("G26-CON-...") often gets read as the digit "6", producing
+    "626-CON-...". Rewrite the sample_mark so every downstream consumer
+    (preview cards, ledger match, debug output) sees the corrected
+    string. Other prefixes are left untouched.
+    """
+    import re
+    for cube in data.get("cubes", []) or []:
+        mark = cube.get("sample_mark")
+        if not isinstance(mark, str):
+            continue
+        new = re.sub(r"^626-", "G26-", mark)
+        if new != mark:
+            cube["sample_mark"] = new
+            try:
+                _log(f"[OCR-FIX] '{mark}' -> '{new}'")
+            except Exception:
+                pass
+    return data
+
+
 def _postprocess_cubes(data: dict) -> dict:
-    """Hallucination-drop → empty-row clean → shotcrete top-3 → multi-set split."""
+    """OCR misread fix → hallucination-drop → empty-row clean →
+    shotcrete top-3 → multi-set split."""
     return _split_multi_set_cubes(
         _process_shotcrete_cubes(
-            _clean_empty_rows(_drop_hallucinated_groups(data))
+            _clean_empty_rows(
+                _drop_hallucinated_groups(
+                    _fix_known_ocr_misreads(data)
+                )
+            )
         )
     )
 
