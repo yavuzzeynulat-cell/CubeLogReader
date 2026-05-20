@@ -1418,14 +1418,27 @@ class PreviewWindow:
         any_val_7 = _any_selected_has_value(rows_7d)
         any_val_28 = _any_selected_has_value(rows_28d)
 
-        # Shotcrete cards in the main preview always start UNCHECKED.
-        # The shotcrete write path is invasive (touches diameter/height
-        # cells too) and the user explicitly opted to tick what they
-        # want to write. This avoids the "I only wanted 28-day but
-        # 7-day got auto-ticked" surprise.
-        check_7d = BooleanVar(value=False)
-        check_28d = BooleanVar(value=False)
-        cube_enabled.set(False)
+        # If ANY cell in a group already has data in Excel, that group
+        # is "done" — checkbox OFF. Otherwise default ON when there are
+        # notebook values to write.
+        group_7_has_existing = (
+            (not all(excel_w7_empty)) or (not all(excel_l7_empty))
+        )
+        group_28_has_existing = (
+            (not all(excel_w28_empty)) or (not all(excel_l28_empty))
+        )
+
+        check_7d = BooleanVar(
+            value=any_excel_7_empty and any_val_7
+            and not group_7_has_existing
+        )
+        check_28d = BooleanVar(
+            value=any_excel_28_empty and any_val_28
+            and not group_28_has_existing
+        )
+        cube_enabled.set(
+            (sheet is not None) and (check_7d.get() or check_28d.get())
+        )
 
         # For arrow-key focus navigation: flatten only the selected rows'
         # weight/load widgets so navigation behaves like normal cubes.
