@@ -1867,6 +1867,7 @@ class LedgerPreviewWindow:
         self._ledger_menu = None
         self._body = None
         self._title_label = None
+        self._notfound_visible = False  # hidden by default; toggle button
         try:
             self._candidates = writer.find_ledger_candidates()
         except Exception as e:
@@ -2112,6 +2113,16 @@ class LedgerPreviewWindow:
                 pass
         self._build_body()
 
+    def _toggle_notfound(self):
+        """Show/hide the 'not found' details banner."""
+        self._notfound_visible = not self._notfound_visible
+        if self._body is not None:
+            try:
+                self._body.destroy()
+            except Exception:
+                pass
+        self._build_body()
+
     def _build_body(self):
         """(Re)build the legend + not-found banner + scrollable card area."""
         body = ctk.CTkFrame(self.win, fg_color="transparent")
@@ -2129,7 +2140,7 @@ class LedgerPreviewWindow:
             ).pack(pady=40)
             return
 
-        # Legend + not-found banner
+        # Legend + not-found toggle
         legend = ctk.CTkFrame(body, fg_color="transparent")
         legend.pack(fill="x", pady=(0, 6))
         ctk.CTkLabel(
@@ -2144,6 +2155,18 @@ class LedgerPreviewWindow:
         ).pack(side="left")
 
         if self.not_found:
+            arrow = "▾" if self._notfound_visible else "▸"
+            ctk.CTkButton(
+                legend,
+                text=f"{arrow}  {len(self.not_found)} not found",
+                width=130, height=24,
+                font=ctk.CTkFont(size=11, weight="bold"),
+                fg_color="#7B1818", hover_color="#5C1010",
+                text_color="#FF8A80",
+                command=self._toggle_notfound,
+            ).pack(side="right")
+
+        if self.not_found and self._notfound_visible:
             banner = ctk.CTkFrame(
                 body, corner_radius=8, border_width=2,
                 border_color="#C62828", fg_color="#2a1010",
@@ -2566,6 +2589,7 @@ class ShotcreteLedgerPreviewWindow:
         self._ledger_menu = None
         self._body = None
         self._title_label = None
+        self._notfound_visible = False  # hidden by default; toggle button
         try:
             self._candidates = writer.find_shotcrete_ledger_candidates()
         except Exception as e:
@@ -2793,6 +2817,16 @@ class ShotcreteLedgerPreviewWindow:
                 pass
         self._build_body()
 
+    def _toggle_notfound(self):
+        """Show/hide the 'not found' details banner."""
+        self._notfound_visible = not self._notfound_visible
+        if self._body is not None:
+            try:
+                self._body.destroy()
+            except Exception:
+                pass
+        self._build_body()
+
     def _build_body(self):
         body = ctk.CTkFrame(self.win, fg_color="transparent")
         body.pack(side="top", fill="both", expand=True, padx=16, pady=12)
@@ -2822,6 +2856,18 @@ class ShotcreteLedgerPreviewWindow:
         ).pack(side="left")
 
         if self.not_found:
+            arrow = "▾" if self._notfound_visible else "▸"
+            ctk.CTkButton(
+                legend,
+                text=f"{arrow}  {len(self.not_found)} not found",
+                width=130, height=24,
+                font=ctk.CTkFont(size=11, weight="bold"),
+                fg_color="#7B1818", hover_color="#5C1010",
+                text_color="#FF8A80",
+                command=self._toggle_notfound,
+            ).pack(side="right")
+
+        if self.not_found and self._notfound_visible:
             banner = ctk.CTkFrame(
                 body, corner_radius=8, border_width=2,
                 border_color="#C62828", fg_color="#2a1010",
