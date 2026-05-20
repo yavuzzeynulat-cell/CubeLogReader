@@ -756,6 +756,45 @@ def read_ledger_values(ws, blocks: list[dict]) -> dict:
     return result
 
 
+def read_shotcrete_ledger_values(ws, blocks: list[dict]) -> dict:
+    """
+    Shotcrete sibling of read_ledger_values. Reads four columns per row:
+    L (Core Diameter), M (Core Height), N (Weight), O (Load) for every
+    row covered by `blocks`. One batched COM read.
+    Returns {block_index: {"diameters":[...], "heights":[...],
+                           "weights":[...], "loads":[...]}}.
+    """
+    if not blocks:
+        return {}
+    first = blocks[0]["start_row"]
+    last = blocks[-1]["end_row"]
+    data = ws.Range(f"L{first}:O{last}").Value
+    if data is None:
+        return {
+            i: {
+                "diameters": [None] * b["size"],
+                "heights": [None] * b["size"],
+                "weights": [None] * b["size"],
+                "loads": [None] * b["size"],
+            }
+            for i, b in enumerate(blocks)
+        }
+    if not isinstance(data[0], tuple):
+        data = (data,)
+    result: dict = {}
+    for i, b in enumerate(blocks):
+        off = b["start_row"] - first
+        n = b["size"]
+        rows = data[off: off + n]
+        result[i] = {
+            "diameters": [r[0] for r in rows],
+            "heights":   [r[1] for r in rows],
+            "weights":   [r[2] for r in rows],
+            "loads":     [r[3] for r in rows],
+        }
+    return result
+
+
 def merge_cubes_for_ledger(cubes_data: dict) -> list[dict]:
     """
     Reshape the post-processed `cubes_data` for ledger writing:
