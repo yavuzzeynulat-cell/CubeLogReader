@@ -23,16 +23,19 @@ def _fake_find_candidates(*a, **k):
 
 
 def _fake_blocks(ws):
+    # NOTE: sample_key must match what ledger_sample_key() produces on the
+    # cube's sample_mark — leading zeros are stripped to integers, e.g.
+    # "G26-CON-027" → "G26-CON-27".
     return [
         {  # 027 — clean 5+5
-            "sample_key": "G26-CON-027", "sample_id_num": 27,
+            "sample_key": "G26-CON-27", "sample_id_num": 27,
             "sample_mark_raw": "G26-CON-027", "cube_no": 2, "cube_no_raw": 2,
             "start_row": 2309, "end_row": 2318, "size": 10,
             "rows_7d":  [2309, 2310, 2311, 2312, 2313],
             "rows_28d": [2314, 2315, 2316, 2317, 2318],
         },
         {  # 082 — 7-day pre-filled in ledger (gray cells)
-            "sample_key": "G26-CON-082", "sample_id_num": 82,
+            "sample_key": "G26-CON-82", "sample_id_num": 82,
             "sample_mark_raw": "G26-CON-082", "cube_no": 3, "cube_no_raw": 3,
             "start_row": 2319, "end_row": 2328, "size": 10,
             "rows_7d":  [2319, 2320, 2321, 2322, 2323],

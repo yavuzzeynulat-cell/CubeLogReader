@@ -408,6 +408,15 @@ SELECTED_BORDER = "#1976D2"   # blue — currently selected card
 DIM_BG = "gray90"             # unused shotcrete row background
 
 
+def _is_none_or_empty(v) -> bool:
+    """True if a ledger cell value (from a COM read) counts as empty."""
+    if v is None:
+        return True
+    if isinstance(v, str) and not v.strip():
+        return True
+    return False
+
+
 class PreviewWindow:
     """Shows the extracted data, lets the user edit and write to Excel."""
 
@@ -2397,6 +2406,708 @@ class LedgerPreviewWindow:
 
         messagebox.showinfo("Ledger — Result", "\n".join(lines), parent=self.win)
 
+        if not all_errors:
+            self._close()
+
+
+# ---------- Shotcrete Ledger Preview Window ----------
+
+class ShotcreteLedgerPreviewWindow:
+    """
+    Books Excel write pass for SHOTCRETE cubes. Sibling of
+    LedgerPreviewWindow targeting a separate workbook (sheet
+    "Shotcrete Concrete Results"). Reads/writes four value columns per
+    row: L (Diameter), M (Height), N (Weight), O (Load). All 5
+    specimens per age are written — the per-sheet top-3 filter does NOT
+    apply here.
+    """
+
+    def __init__(self, parent, cubes_data: dict, on_close=None):
+        self.parent = parent
+        self.cubes_data = cubes_data
+        self._on_close_cb = on_close
+        self._closed = False
+
+        self.win = ctk.CTkToplevel(parent)
+        self.win.title("Shotcrete Ledger — " + APP_TITLE)
+        sw = self.win.winfo_screenwidth()
+        sh = self.win.winfo_screenheight()
+        ww = min(1400, sw - 60)
+        wh = min(860, sh - 80)
+        self.win.geometry(f"{ww}x{wh}+40+40")
+        self.win.minsize(900, 600)
+        try:
+            self.win.state("zoomed")
+        except Exception:
+            pass
+        self.win.protocol("WM_DELETE_WINDOW", self._close)
+
+        _add_credit_footer(self.win)
+
+        self._entry_font = ctk.CTkFont(family="Segoe UI", size=13)
+        self._title_font = ctk.CTkFont(family="Segoe UI", size=14, weight="bold")
+        self._hdr_font = ctk.CTkFont(family="Segoe UI", size=11, weight="bold")
+        self._pill_font = ctk.CTkFont(family="Segoe UI", size=10, weight="bold")
+        self._check_font = ctk.CTkFont(family="Segoe UI", size=12)
+        self._age_font = ctk.CTkFont(family="Segoe UI", size=13, weight="bold")
+        self._colhdr_font = ctk.CTkFont(family="Segoe UI", size=11, weight="bold")
+
+        try:
+            self.parent.withdraw()
+        except Exception:
+            pass
+
+        self.ledger_error: str | None = None
+        self.wb_name: str | None = None
+        self.sheet_name: str | None = None
+        self.entries: list[dict] = []
+        self.not_found: list[str] = []
+        self._ws = None
+
+        self._cards: list = []
+        self._selected_idx: int | None = None
+        self._cube_list = None
+        self._scroll_anim_id: str | None = None
+
+        self._candidates: list = []
+        self._cand_labels: list[str] = []
+        self._cand_index = 0
+        self._ledger_menu = None
+        self._body = None
+        self._title_label = None
+        try:
+            self._candidates = writer.find_shotcrete_ledger_candidates()
+        except Exception as e:
+            self.ledger_error = str(e)
+
+        seen: dict[str, int] = {}
+        for (_w, _ws, wb_name, _sh) in self._candidates:
+            if wb_name in seen:
+                seen[wb_name] += 1
+                self._cand_labels.append(f"{wb_name} ({seen[wb_name]})")
+            else:
+                seen[wb_name] = 1
+                self._cand_labels.append(wb_name)
+
+        if self._candidates:
+            self._load_ledger(self._candidates[0])
+
+        self._build_ui()
+
+    def _close(self):
+        if self._closed:
+            return
+        self._closed = True
+        self._ws = None
+        try:
+            self.win.destroy()
+        except Exception:
+            pass
+        try:
+            self.parent.deiconify()
+        except Exception:
+            pass
+        if self._on_close_cb is not None:
+            try:
+                self._on_close_cb()
+            except Exception:
+                pass
+
+    def _load_ledger(self, candidate) -> bool:
+        """Read one shotcrete ledger workbook and populate self.entries.
+        Returns False on failure (previous state preserved)."""
+        wb, ws, wb_name, sh_name = candidate
+        try:
+            blocks = writer.read_shotcrete_ledger_blocks(ws)
+            values = writer.read_shotcrete_ledger_values(ws, blocks)
+            merged = writer.merge_shotcrete_cubes_for_ledger(self.cubes_data)
+            matches = writer.match_cubes_to_blocks(merged, blocks)
+        except Exception as e:
+            self.ledger_error = str(e)
+            return False
+
+        try:
+            from reader import _log
+            _log(
+                f"[SHOT-LEDGER-DEBUG] {wb_name}: {len(blocks)} blocks, "
+                f"{len(merged)} shotcrete cubes"
+            )
+        except Exception:
+            pass
+
+        entries: list[dict] = []
+        not_found: list[str] = []
+        block_idx_by_id = {id(b): i for i, b in enumerate(blocks)}
+        for m in matches:
+            cube = m["cube"]
+            block = m["block"]
+            reason = m["mismatch_reason"]
+            if block is None:
+                not_found.append(cube.get("sample_mark", "?"))
+                continue
+            bi = block_idx_by_id[id(block)]
+            vals = values.get(bi, {"diameters": [], "heights": [],
+                                   "weights": [], "loads": []})
+            entries.append({
+                "cube": cube,
+                "block": block,
+                "mismatch": reason,
+                "diameters_ledger": vals["diameters"],
+                "heights_ledger":   vals["heights"],
+                "weights_ledger":   vals["weights"],
+                "loads_ledger":     vals["loads"],
+                "enabled": BooleanVar(value=reason is None),
+            })
+
+        self.ledger_error = None
+        self.wb_name = wb_name
+        self.sheet_name = sh_name
+        self._ws = ws
+        self.entries = entries
+        self.not_found = not_found
+        self._cards = []
+        self._selected_idx = None
+        return True
+
+    def _compute_title(self) -> str:
+        if self.ledger_error or self.sheet_name is None:
+            return "Shotcrete Ledger Preview — ERROR"
+        ok_cnt = sum(1 for e in self.entries if e["mismatch"] is None)
+        bad_cnt = sum(1 for e in self.entries if e["mismatch"] is not None)
+        return (
+            f"Shotcrete Ledger Preview — {self.sheet_name}  ·  "
+            f"{ok_cnt} ready, {bad_cnt} mismatched, "
+            f"{len(self.not_found)} not found"
+        )
+
+    def _build_ui(self):
+        top = ctk.CTkFrame(self.win, corner_radius=0, height=60)
+        top.pack(side="top", fill="x")
+        top.pack_propagate(False)
+
+        self._title_label = ctk.CTkLabel(
+            top, text=self._compute_title(),
+            font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        self._title_label.pack(side="left", padx=20, pady=16)
+
+        ctk.CTkButton(
+            top, text="Cancel", width=90,
+            fg_color="gray70", hover_color="gray60",
+            command=self._close,
+        ).pack(side="right", padx=(0, 10), pady=12)
+
+        self.write_btn = ctk.CTkButton(
+            top, text=">> WRITE TO LEDGER",
+            width=200, height=36,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color="#EF6C00", hover_color="#E65100",
+            command=self._do_write,
+        )
+        self.write_btn.pack(side="right", padx=(0, 10), pady=12)
+
+        writable = any(e["mismatch"] is None for e in self.entries)
+        if not writable:
+            self.write_btn.configure(state="disabled")
+
+        self._build_selector()
+        self._build_body()
+
+    def _build_selector(self):
+        bar = ctk.CTkFrame(self.win, fg_color="transparent")
+        bar.pack(side="top", fill="x", padx=22, pady=(6, 0))
+        if not self._candidates:
+            return
+        sel_font = ctk.CTkFont(family="Segoe UI", size=11)
+        if len(self._candidates) == 1:
+            ctk.CTkLabel(
+                bar, text=f"Yazılacak dosya: {self._cand_labels[0]}",
+                font=sel_font, text_color="gray55",
+            ).pack(side="left")
+        else:
+            ctk.CTkLabel(
+                bar, text="Shotcrete ledger dosyası:",
+                font=sel_font, text_color="gray55",
+            ).pack(side="left", padx=(0, 6))
+            self._ledger_menu = ctk.CTkOptionMenu(
+                bar, values=self._cand_labels,
+                command=self._on_select_ledger,
+                font=sel_font, height=24, width=280,
+                fg_color="gray25", button_color="gray30",
+                button_hover_color="gray35", text_color="gray80",
+                dropdown_font=sel_font,
+            )
+            self._ledger_menu.set(self._cand_labels[self._cand_index])
+            self._ledger_menu.pack(side="left")
+
+    def _on_select_ledger(self, choice: str):
+        try:
+            idx = self._cand_labels.index(choice)
+        except ValueError:
+            return
+        if idx == self._cand_index:
+            return
+        prev = self._cand_index
+        self._cand_index = idx
+        if self._load_ledger(self._candidates[idx]):
+            self._refresh_view()
+        else:
+            err = self.ledger_error or "unknown error"
+            self.ledger_error = None
+            self._cand_index = prev
+            if self._ledger_menu is not None:
+                self._ledger_menu.set(self._cand_labels[prev])
+            messagebox.showwarning(
+                "Shotcrete Ledger",
+                "Could not load that ledger file:\n" + err,
+                parent=self.win,
+            )
+
+    def _refresh_view(self):
+        if self._title_label is not None:
+            self._title_label.configure(text=self._compute_title())
+        writable = any(e["mismatch"] is None for e in self.entries)
+        self.write_btn.configure(state="normal" if writable else "disabled")
+        if self._body is not None:
+            try:
+                self._body.destroy()
+            except Exception:
+                pass
+        self._build_body()
+
+    def _build_body(self):
+        body = ctk.CTkFrame(self.win, fg_color="transparent")
+        body.pack(side="top", fill="both", expand=True, padx=16, pady=12)
+        self._body = body
+
+        if self.ledger_error:
+            ctk.CTkLabel(
+                body,
+                text="Shotcrete ledger error:\n" + self.ledger_error,
+                text_color="#C62828",
+                font=self._entry_font,
+                justify="left", wraplength=900,
+            ).pack(pady=40)
+            return
+
+        legend = ctk.CTkFrame(body, fg_color="transparent")
+        legend.pack(fill="x", pady=(0, 6))
+        ctk.CTkLabel(
+            legend, text="Green = ledger cell empty (will write)",
+            text_color=EMPTY_BORDER,
+            font=ctk.CTkFont(size=11, weight="bold"),
+        ).pack(side="left", padx=(0, 16))
+        ctk.CTkLabel(
+            legend, text="Gray = already filled (skip)",
+            text_color="gray55",
+            font=ctk.CTkFont(size=11),
+        ).pack(side="left")
+
+        if self.not_found:
+            banner = ctk.CTkFrame(
+                body, corner_radius=8, border_width=2,
+                border_color="#C62828", fg_color="#2a1010",
+            )
+            banner.pack(fill="x", pady=(4, 10))
+            joined = ", ".join(self.not_found)
+            ctk.CTkLabel(
+                banner,
+                text=f"⚠ {len(self.not_found)} shotcrete cubes not found in ledger: {joined}",
+                text_color="#FF8A80",
+                font=ctk.CTkFont(size=12, weight="bold"),
+                anchor="w", justify="left", wraplength=1100,
+            ).pack(fill="x", padx=12, pady=8)
+
+        scroll = ctk.CTkScrollableFrame(body, fg_color="transparent")
+        scroll.pack(fill="both", expand=True)
+        self._cube_list = scroll
+
+        for entry in self.entries:
+            self._build_card(scroll, entry)
+
+        # Arrow-key card navigation
+        self.win.bind("<Down>", self._on_card_down)
+        self.win.bind("<Up>", self._on_card_up)
+
+        if not self.entries and not self.not_found:
+            ctk.CTkLabel(
+                body,
+                text="No shotcrete cubes to write.",
+                text_color="gray55",
+                font=self._entry_font,
+            ).pack(pady=20)
+
+    def _build_card(self, parent, entry: dict):
+        cube = entry["cube"]
+        block = entry["block"]
+        mismatch = entry["mismatch"]
+        bad = mismatch is not None
+
+        card = ctk.CTkFrame(parent, corner_radius=12, border_width=1)
+        card.pack(fill="x", padx=8, pady=8)
+        self._cards.append(card)
+
+        header = ctk.CTkFrame(card, fg_color="transparent")
+        header.pack(fill="x", padx=15, pady=(12, 6))
+        header.grid_columnconfigure(0, weight=1, uniform="h")
+        header.grid_columnconfigure(1, weight=0)
+        header.grid_columnconfigure(2, weight=1, uniform="h")
+
+        cube_checkbox = ctk.CTkCheckBox(
+            header, text="Write this sample",
+            variable=entry["enabled"], font=self._check_font,
+        )
+        cube_checkbox.grid(row=0, column=0, sticky="w")
+        if bad:
+            cube_checkbox.configure(state="disabled")
+
+        title_txt = (
+            f"Core No {cube.get('cube_no', '?')}  ·  "
+            f"{cube.get('sample_mark', '?')}"
+        )
+        ctk.CTkLabel(
+            header, text=title_txt, font=self._title_font,
+        ).grid(row=0, column=1, sticky="")
+
+        pill_text = "[MISMATCH]" if bad else "[SHOTCRETE]"
+        pill_color = PILL_NO_COLOR if bad else "#EF6C00"
+        ctk.CTkLabel(
+            header, text=pill_text, font=self._pill_font,
+            text_color="white", fg_color=pill_color,
+            corner_radius=8, padx=10, pady=2,
+        ).grid(row=0, column=2, sticky="e")
+
+        if mismatch:
+            ctk.CTkLabel(
+                card, text="⚠ " + mismatch, text_color="#FF8A80",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                anchor="w",
+            ).pack(anchor="w", padx=15, pady=(0, 6))
+
+        # ---- Value grid (concrete-style: centered, single age label per group,
+        #      per-group checkbox on the right) ----
+        grid = ctk.CTkFrame(card, fg_color="transparent")
+        grid.pack(padx=15, pady=(2, 12))
+
+        # Column headers row
+        ctk.CTkLabel(grid, text="", width=90).grid(row=0, column=0)
+        for col, txt in enumerate(
+            ["Diameter (mm)", "Height (mm)", "Weight (gr)", "Load (kN)"],
+            start=1,
+        ):
+            ctk.CTkLabel(
+                grid, text=txt, width=150, font=self._colhdr_font,
+            ).grid(row=0, column=col, padx=6)
+        ctk.CTkLabel(grid, text="", width=70).grid(row=0, column=5)
+
+        tests_7 = cube.get("tests_7d", [])
+        tests_28 = cube.get("tests_28d", [])
+        rows_7d = block.get("rows_7d", []) or []
+        rows_28d = block.get("rows_28d", []) or []
+        block_start = block["start_row"]
+
+        diam_l = entry["diameters_ledger"]
+        height_l = entry["heights_ledger"]
+        weight_l = entry["weights_ledger"]
+        load_l = entry["loads_ledger"]
+
+        def _existing(arr, off):
+            return arr[off] if (0 <= off < len(arr)) else None
+
+        entry["diam_7d_entries"]   = []
+        entry["height_7d_entries"] = []
+        entry["weight_7d_entries"] = []
+        entry["load_7d_entries"]   = []
+        entry["diam_28d_entries"]   = []
+        entry["height_28d_entries"] = []
+        entry["weight_28d_entries"] = []
+        entry["load_28d_entries"]   = []
+
+        def _build_group(start_row, age_label, age_color, tests, age_rows,
+                         out_diam, out_h, out_w, out_l):
+            n_rows = max(len(tests), len(age_rows), 1)
+            # Single age label spanning all rows in the group.
+            ctk.CTkLabel(
+                grid, text=age_label, text_color=age_color,
+                font=self._age_font, width=90, anchor="w",
+            ).grid(
+                row=start_row, column=0, rowspan=n_rows, sticky="w",
+                padx=(0, 4), pady=(8, 4),
+            )
+
+            any_will_write = False
+            for i in range(n_rows):
+                row_no = start_row + i
+                t = tests[i] if i < len(tests) else {}
+                target_row = age_rows[i] if i < len(age_rows) else None
+                off = (target_row - block_start) if target_row is not None else -1
+
+                existing = [
+                    _existing(diam_l, off),
+                    _existing(height_l, off),
+                    _existing(weight_l, off),
+                    _existing(load_l, off),
+                ]
+                cell_values = [
+                    t.get("core_diameter_mm"),
+                    t.get("core_height_mm"),
+                    t.get("weight_gr"),
+                    t.get("load_kn"),
+                ]
+                cell_widgets = []
+                for col, (val, ex) in enumerate(
+                    zip(cell_values, existing), start=1,
+                ):
+                    empty = _is_none_or_empty(ex)
+                    if val is not None and empty:
+                        any_will_write = True
+                    var = StringVar(value="" if val is None else str(val))
+                    kwargs = dict(
+                        textvariable=var, width=150, height=38,
+                        justify="center", font=self._entry_font,
+                        border_width=2,
+                    )
+                    if empty:
+                        # Empty in ledger → will be written; green border.
+                        kwargs["border_color"] = EMPTY_BORDER
+                    else:
+                        # Already filled → skip; gray text + gray border.
+                        kwargs["text_color"] = FILLED_TEXT
+                        kwargs["border_color"] = "gray40"
+                    e = ctk.CTkEntry(grid, **kwargs)
+                    e.grid(row=row_no, column=col, padx=6, pady=4)
+                    cell_widgets.append(e)
+                out_diam.append(cell_widgets[0])
+                out_h.append(cell_widgets[1])
+                out_w.append(cell_widgets[2])
+                out_l.append(cell_widgets[3])
+
+            # Per-group checkbox on the right, spanning the whole group.
+            group_var = BooleanVar(value=any_will_write and not bad)
+            group_chk = ctk.CTkCheckBox(
+                grid, text="", variable=group_var, width=24,
+            )
+            group_chk.grid(
+                row=start_row, column=5, rowspan=n_rows, sticky="",
+                padx=(12, 0), pady=3,
+            )
+            if bad:
+                group_chk.configure(state="disabled")
+            return group_var, n_rows
+
+        n7_rows = max(len(tests_7), len(rows_7d), 1)
+        c7, _ = _build_group(
+            1, "7-day", AGE_7_COLOR, tests_7, rows_7d,
+            entry["diam_7d_entries"], entry["height_7d_entries"],
+            entry["weight_7d_entries"], entry["load_7d_entries"],
+        )
+
+        # Vertical spacer row between 7-day and 28-day groups.
+        spacer_row = 1 + n7_rows
+        ctk.CTkFrame(grid, fg_color="transparent", height=16).grid(
+            row=spacer_row, column=0, columnspan=6, sticky="ew",
+        )
+
+        c28, _ = _build_group(
+            spacer_row + 1, "28-day", AGE_28_COLOR, tests_28, rows_28d,
+            entry["diam_28d_entries"], entry["height_28d_entries"],
+            entry["weight_28d_entries"], entry["load_28d_entries"],
+        )
+        entry["check_7d"] = c7
+        entry["check_28d"] = c28
+
+        if not bad and not c7.get() and not c28.get():
+            entry["enabled"].set(False)
+
+    # ---- Arrow-key card navigation (mirrors LedgerPreviewWindow) ----
+
+    def _on_card_down(self, _event=None):
+        if not self._cards:
+            return "break"
+        if self._selected_idx is None:
+            self._select_card(0)
+        else:
+            self._select_card(
+                min(self._selected_idx + 1, len(self._cards) - 1)
+            )
+        return "break"
+
+    def _on_card_up(self, _event=None):
+        if not self._cards:
+            return "break"
+        if self._selected_idx is None:
+            self._select_card(0)
+        else:
+            self._select_card(max(self._selected_idx - 1, 0))
+        return "break"
+
+    def _select_card(self, idx: int):
+        if idx < 0 or idx >= len(self._cards):
+            return
+        if self._selected_idx is not None and self._selected_idx != idx:
+            try:
+                self._cards[self._selected_idx].configure(
+                    border_color=("gray70", "gray30"), border_width=1,
+                )
+            except Exception:
+                pass
+        self._selected_idx = idx
+        try:
+            self._cards[idx].configure(
+                border_color=SELECTED_BORDER, border_width=3,
+            )
+        except Exception:
+            pass
+        self._scroll_to_card_centered(idx)
+
+    def _scroll_to_card_centered(self, idx: int):
+        """Animate the card list so card idx sits vertically centered."""
+        canvas = getattr(self._cube_list, "_parent_canvas", None)
+        if canvas is None:
+            return
+        card = self._cards[idx]
+        self.win.update_idletasks()
+        bbox = canvas.bbox("all")
+        if not bbox:
+            return
+        total_h = bbox[3] - bbox[1]
+        view_h = canvas.winfo_height()
+        if total_h <= view_h:
+            return  # nothing to scroll
+        card_y = card.winfo_y()
+        card_h = card.winfo_height()
+        target = card_y + card_h / 2 - view_h / 2
+        target = max(0, min(target, total_h - view_h))
+        self._animate_scroll(canvas, target / total_h, duration_ms=220)
+
+    def _animate_scroll(self, canvas, target_frac: float, duration_ms: int = 220):
+        """Ease-out animated yview_moveto."""
+        if self._scroll_anim_id is not None:
+            try:
+                self.win.after_cancel(self._scroll_anim_id)
+            except Exception:
+                pass
+            self._scroll_anim_id = None
+
+        frame_ms = 16
+        frames = max(1, duration_ms // frame_ms)
+        try:
+            start_frac = canvas.yview()[0]
+        except Exception:
+            start_frac = 0.0
+
+        def step(i):
+            t = i / frames
+            ease = 1 - (1 - t) ** 3  # ease-out cubic
+            pos = start_frac + (target_frac - start_frac) * ease
+            try:
+                canvas.yview_moveto(pos)
+            except Exception:
+                return
+            if i < frames:
+                self._scroll_anim_id = self.win.after(
+                    frame_ms, lambda: step(i + 1)
+                )
+            else:
+                self._scroll_anim_id = None
+
+        step(1)
+
+    def _do_write(self):
+        if self.ledger_error:
+            return
+
+        def _f(entry_widget):
+            t = entry_widget.get().strip()
+            if not t:
+                return None
+            try:
+                return float(t)
+            except ValueError:
+                return None
+
+        written_cubes = 0
+        total_cells = 0
+        total_skipped = 0
+        all_errors: list[str] = []
+        unchecked: list[str] = []
+
+        for entry in self.entries:
+            cube = entry["cube"]
+            mark = cube.get("sample_mark", "?")
+            if entry["mismatch"] is not None:
+                continue
+            if not entry["enabled"].get():
+                unchecked.append(mark)
+                continue
+            do_7d = entry["check_7d"].get()
+            do_28d = entry["check_28d"].get()
+            if not do_7d and not do_28d:
+                unchecked.append(mark)
+                continue
+
+            tests_7d = []
+            for d, h, w, l in zip(
+                entry["diam_7d_entries"], entry["height_7d_entries"],
+                entry["weight_7d_entries"], entry["load_7d_entries"],
+            ):
+                tests_7d.append({
+                    "age_days": 7,
+                    "core_diameter_mm": _f(d),
+                    "core_height_mm":   _f(h),
+                    "weight_gr":        _f(w),
+                    "load_kn":          _f(l),
+                })
+            tests_28d = []
+            for d, h, w, l in zip(
+                entry["diam_28d_entries"], entry["height_28d_entries"],
+                entry["weight_28d_entries"], entry["load_28d_entries"],
+            ):
+                tests_28d.append({
+                    "age_days": 28,
+                    "core_diameter_mm": _f(d),
+                    "core_height_mm":   _f(h),
+                    "weight_gr":        _f(w),
+                    "load_kn":          _f(l),
+                })
+            cube_for_write = dict(cube)
+            cube_for_write["tests_7d"] = tests_7d
+            cube_for_write["tests_28d"] = tests_28d
+
+            try:
+                result = writer.write_shotcrete_ledger_cube(
+                    self._ws, cube_for_write, entry["block"],
+                    write_7d=do_7d, write_28d=do_28d,
+                )
+                total_cells += len(result["wrote"])
+                total_skipped += len(result["skipped"])
+                all_errors.extend(
+                    f"{mark}: {e}" for e in result["errors"]
+                )
+                if result["wrote"]:
+                    written_cubes += 1
+            except Exception as e:
+                all_errors.append(f"{mark}: write error: {e}")
+
+        lines = [
+            f"{written_cubes} shotcrete cubes updated, "
+            f"{total_cells} cells written, {total_skipped} skipped "
+            "(already filled or no value)."
+        ]
+        if unchecked:
+            lines.append("")
+            lines.append("Skipped (unchecked):")
+            for s in unchecked:
+                lines.append("  - " + s)
+        if all_errors:
+            lines.append("")
+            lines.append("Errors:")
+            for e in all_errors:
+                lines.append("  - " + e)
+
+        messagebox.showinfo(
+            "Shotcrete Ledger", "\n".join(lines), parent=self.win,
+        )
         if not all_errors:
             self._close()
 
