@@ -417,6 +417,70 @@ def _is_none_or_empty(v) -> bool:
     return False
 
 
+def _collect_ledger_debug(window, mode: str) -> str:
+    """Multi-line snapshot of a ledger window's state for support."""
+    lines = ["=" * 60, f"{mode} Ledger Debug", "=" * 60]
+    try:
+        version_path = Path(__file__).parent / "version.txt"
+        ver = version_path.read_text(encoding="utf-8").strip()
+    except Exception:
+        ver = "?"
+    lines.append(f"app version : {ver}")
+    lines.append(f"wb_name     : {getattr(window, 'wb_name', None)!r}")
+    lines.append(f"sheet_name  : {getattr(window, 'sheet_name', None)!r}")
+    cands = getattr(window, "_candidates", []) or []
+    lines.append(f"candidates  : {len(cands)}")
+    for c in cands:
+        try:
+            lines.append(f"   - {c[2]!r} / {c[3]!r}")
+        except Exception:
+            lines.append(f"   - {c!r}")
+    err = getattr(window, "ledger_error", None)
+    if err:
+        lines.append(f"ledger_error: {err}")
+
+    cubes = (getattr(window, "cubes_data", {}) or {}).get("cubes", [])
+    lines.append("")
+    lines.append(f"--- cubes_data ({len(cubes)} cubes from PDF) ---")
+    for c in cubes:
+        flags = []
+        if c.get("_shotcrete"):
+            flags.append("shot")
+        if c.get("_card_enabled") is False:
+            flags.append("disabled")
+        si = c.get("_set_index")
+        if si:
+            flags.append(f"set{si}")
+        tests = c.get("tests", []) or []
+        n7 = sum(1 for t in tests if t.get("age_days") == 7)
+        n28 = sum(1 for t in tests if t.get("age_days") == 28)
+        lines.append(
+            f"   mark={c.get('sample_mark')!r:24} "
+            f"cube_no={c.get('cube_no')!r:>8} "
+            f"flags={','.join(flags) or '-':18} "
+            f"tests={n7}+{n28}"
+        )
+
+    entries = getattr(window, "entries", []) or []
+    not_found = getattr(window, "not_found", []) or []
+    lines.append("")
+    lines.append(f"--- entries ({len(entries)} matched) ---")
+    for e in entries:
+        c = e.get("cube", {})
+        b = e.get("block", {}) or {}
+        lines.append(
+            f"   {c.get('sample_mark')!r:24} cube_no={c.get('cube_no')!r:>8} "
+            f"→ block rows {b.get('start_row')}-{b.get('end_row')} "
+            f"mismatch={e.get('mismatch')!r}"
+        )
+    lines.append("")
+    lines.append(f"--- not_found ({len(not_found)}) ---")
+    for nf in not_found:
+        lines.append(f"   {nf!r}")
+
+    return "\n".join(lines)
+
+
 class PreviewWindow:
     """Shows the extracted data, lets the user edit and write to Excel."""
 
@@ -1903,6 +1967,26 @@ class LedgerPreviewWindow:
             except Exception:
                 pass
 
+    def _copy_debug(self, mode: str = "Concrete"):
+        """Build a debug snapshot and copy it to the clipboard for support."""
+        try:
+            text = _collect_ledger_debug(self, mode)
+            self.win.clipboard_clear()
+            self.win.clipboard_append(text)
+            self.win.update()  # ensure clipboard is updated on Windows
+            messagebox.showinfo(
+                "Debug",
+                "Diagnostics copied to clipboard.\n\n"
+                "Paste it (Ctrl+V) into the chat to share.",
+                parent=self.win,
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Debug",
+                f"Could not collect diagnostics: {e}",
+                parent=self.win,
+            )
+
     def _build_ui(self):
         # ---- TOP BAR ----
         top = ctk.CTkFrame(self.win, corner_radius=0, height=60)
@@ -1919,6 +2003,13 @@ class LedgerPreviewWindow:
             top, text="Cancel", width=90,
             fg_color="gray70", hover_color="gray60",
             command=self._close,
+        ).pack(side="right", padx=(0, 10), pady=12)
+
+        ctk.CTkButton(
+            top, text="Debug", width=70,
+            fg_color="#455A64", hover_color="#37474F",
+            font=ctk.CTkFont(size=11),
+            command=lambda: self._copy_debug("Concrete"),
         ).pack(side="right", padx=(0, 10), pady=12)
 
         self.write_btn = ctk.CTkButton(
@@ -2513,6 +2604,26 @@ class ShotcreteLedgerPreviewWindow:
             except Exception:
                 pass
 
+    def _copy_debug(self):
+        """Build a debug snapshot and copy it to the clipboard for support."""
+        try:
+            text = _collect_ledger_debug(self, "Shotcrete")
+            self.win.clipboard_clear()
+            self.win.clipboard_append(text)
+            self.win.update()
+            messagebox.showinfo(
+                "Debug",
+                "Diagnostics copied to clipboard.\n\n"
+                "Paste it (Ctrl+V) into the chat to share.",
+                parent=self.win,
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Debug",
+                f"Could not collect diagnostics: {e}",
+                parent=self.win,
+            )
+
     def _load_ledger(self, candidate) -> bool:
         """Read one shotcrete ledger workbook and populate self.entries.
         Returns False on failure (previous state preserved)."""
@@ -2595,6 +2706,13 @@ class ShotcreteLedgerPreviewWindow:
             top, text="Cancel", width=90,
             fg_color="gray70", hover_color="gray60",
             command=self._close,
+        ).pack(side="right", padx=(0, 10), pady=12)
+
+        ctk.CTkButton(
+            top, text="Debug", width=70,
+            fg_color="#455A64", hover_color="#37474F",
+            font=ctk.CTkFont(size=11),
+            command=self._copy_debug,
         ).pack(side="right", padx=(0, 10), pady=12)
 
         self.write_btn = ctk.CTkButton(
