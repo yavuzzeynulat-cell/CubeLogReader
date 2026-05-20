@@ -486,6 +486,11 @@ def ledger_sample_key(mark) -> str | None:
         return None
     num = int(m.group(1))
     prefix = s[: m.start()].rstrip("- ").upper()
+    # Known Gemini OCR misread: handwritten "G" at the start of a prefix is
+    # often read as the digit "6", producing "626-CON-NNN" where the real
+    # mark is "G26-CON-NNN". Normalize so the ledger match still works.
+    if prefix.startswith("626-") or prefix == "626":
+        prefix = "G26" + prefix[3:]
     return f"{prefix}-{num}" if prefix else str(num)
 
 
@@ -859,15 +864,17 @@ def merge_cubes_for_ledger(cubes_data: dict) -> list[dict]:
 
 def merge_shotcrete_cubes_for_ledger(cubes_data: dict) -> list[dict]:
     """
-    Shotcrete sibling of merge_cubes_for_ledger. Two inversions:
+    Shotcrete sibling of merge_cubes_for_ledger.
       1. Keep ONLY cubes with _shotcrete=True (concrete dropped them).
       2. Do NOT skip tests where _selected is False - all 5 specimens
          per age are forwarded so the ledger receives every result.
-    Carry-overs from the concrete merge:
-      - Skip cubes where _card_enabled is False (master tick unset in
-        the first PreviewWindow).
-      - Merge multi-set sub-cubes back by (sample_key, cube_no);
-        concatenate tests in _set_index order.
+      3. Do NOT skip cubes where _card_enabled is False — for shotcrete
+         the master tick on the first PreviewWindow only controls the
+         per-sheet write. The ledger is the user's only path to record
+         shotcrete data, so it must include those cubes too. The
+         in-window "Write this sample" checkbox here is the real gate.
+    Carry-over: merge multi-set sub-cubes back by (sample_key, cube_no);
+    concatenate tests in _set_index order.
 
     Returns a list of {sample_key, sample_id_num, sample_mark, cube_no,
     tests_7d, tests_28d}.
@@ -876,8 +883,6 @@ def merge_shotcrete_cubes_for_ledger(cubes_data: dict) -> list[dict]:
     order: list = []
     for cube in cubes_data.get("cubes", []):
         if not cube.get("_shotcrete"):
-            continue
-        if cube.get("_card_enabled") is False:
             continue
         key = ledger_sample_key(cube.get("sample_mark"))
         if key is None:
