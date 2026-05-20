@@ -857,6 +857,71 @@ def merge_cubes_for_ledger(cubes_data: dict) -> list[dict]:
     return result
 
 
+def merge_shotcrete_cubes_for_ledger(cubes_data: dict) -> list[dict]:
+    """
+    Shotcrete sibling of merge_cubes_for_ledger. Two inversions:
+      1. Keep ONLY cubes with _shotcrete=True (concrete dropped them).
+      2. Do NOT skip tests where _selected is False - all 5 specimens
+         per age are forwarded so the ledger receives every result.
+    Carry-overs from the concrete merge:
+      - Skip cubes where _card_enabled is False (master tick unset in
+        the first PreviewWindow).
+      - Merge multi-set sub-cubes back by (sample_key, cube_no);
+        concatenate tests in _set_index order.
+
+    Returns a list of {sample_key, sample_id_num, sample_mark, cube_no,
+    tests_7d, tests_28d}.
+    """
+    by_num: dict = {}
+    order: list = []
+    for cube in cubes_data.get("cubes", []):
+        if not cube.get("_shotcrete"):
+            continue
+        if cube.get("_card_enabled") is False:
+            continue
+        key = ledger_sample_key(cube.get("sample_mark"))
+        if key is None:
+            continue
+        cube_no = normalize_cube_no(cube.get("cube_no"))
+        set_idx = cube.get("_set_index") or 1
+        merge_key = (key, cube_no)
+        if merge_key not in by_num:
+            by_num[merge_key] = {
+                "sample_key": key,
+                "sample_id_num": normalize_sample_mark(cube.get("sample_mark")),
+                "sample_mark": cube.get("sample_mark"),
+                "cube_no": cube_no,
+                "_sets": {},
+            }
+            order.append(merge_key)
+        entry = by_num[merge_key]
+        sets = entry["_sets"]
+        if set_idx not in sets:
+            sets[set_idx] = ([], [])
+        t7, t28 = sets[set_idx]
+        for t in cube.get("tests", []):
+            age = t.get("age_days")
+            if age == 7:
+                t7.append(t)
+            elif age == 28:
+                t28.append(t)
+
+    out = []
+    for merge_key in order:
+        entry = by_num[merge_key]
+        sets = entry.pop("_sets")
+        tests_7d: list = []
+        tests_28d: list = []
+        for sidx in sorted(sets.keys()):
+            t7, t28 = sets[sidx]
+            tests_7d.extend(t7)
+            tests_28d.extend(t28)
+        entry["tests_7d"] = tests_7d
+        entry["tests_28d"] = tests_28d
+        out.append(entry)
+    return out
+
+
 def match_cubes_to_blocks(
     merged_cubes: list[dict], blocks: list[dict]
 ) -> list[dict]:
