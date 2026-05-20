@@ -534,6 +534,38 @@ def find_ledger_sheet():
     return candidates[0]
 
 
+def find_shotcrete_ledger_candidates():
+    """
+    Locate every open workbook holding a shotcrete ledger sheet.
+    Detection is by row-7 header text: A7 contains "core no" (note: the
+    concrete ledger says "cube no" — single-word difference) and B7
+    contains "sampling mark". Sheet tab name is NOT checked; the real
+    workbook uses "Shotcrete Concrete Results" but other names are fine.
+    Returns a list of (workbook_com, worksheet_com, workbook_name, sheet_name).
+    Raises RuntimeError only when there are 0 candidates.
+    """
+    excel = connect_to_excel()
+    candidates = []
+    for wb in excel.Workbooks:
+        for ws in wb.Worksheets:
+            try:
+                a7 = ws.Range("A7").Value
+                b7 = ws.Range("B7").Value
+            except Exception:
+                continue
+            a7s = str(a7 or "").lower()
+            b7s = str(b7 or "").lower()
+            if "core no" in a7s and "sampling mark" in b7s:
+                candidates.append((wb, ws, str(wb.Name), str(ws.Name)))
+    if not candidates:
+        raise RuntimeError(
+            "Shotcrete ledger not found: no open Excel workbook has a "
+            "sheet with 'Core No.' / 'Site Sampling Mark/No:' headers on "
+            "row 7. Open the shotcrete ledger file first."
+        )
+    return candidates
+
+
 def read_ledger_blocks(ws) -> list[dict]:
     """
     Scan from row 8 downward; identify blocks by B-filled rows.
