@@ -3289,18 +3289,44 @@ class MainWindow:
         )
         self.pick_btn.pack(fill="x", pady=(4, 0))
 
-        # Secondary action: open the ledger preview.
-        # Disabled until the user finishes a first-Excel write.
-        self.ledger_btn = ctk.CTkButton(
-            body,
-            text="Go to Books Excel section",
-            height=40,
+        # Secondary action: Books Excel group (Concrete + Shotcrete).
+        # Both buttons are disabled until the user finishes a first-Excel write.
+        self.books_group = ctk.CTkFrame(body, fg_color="transparent")
+        self.books_group.pack(fill="x", pady=(12, 0))
+
+        ctk.CTkLabel(
+            self.books_group, text="Books Excel",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color="gray55",
+        ).pack(anchor="w", pady=(0, 2))
+
+        books_row = ctk.CTkFrame(self.books_group, fg_color="transparent")
+        books_row.pack(fill="x")
+
+        self.concrete_books_btn = ctk.CTkButton(
+            books_row, text="CONCRETE", height=40,
             font=ctk.CTkFont(size=13, weight="bold"),
             fg_color="#1565C0", hover_color="#0D47A1",
             command=self._on_open_ledger,
             state="disabled",
         )
-        self.ledger_btn.pack(fill="x", pady=(12, 0))
+        self.concrete_books_btn.pack(
+            side="left", fill="x", expand=True, padx=(0, 4),
+        )
+
+        self.shotcrete_books_btn = ctk.CTkButton(
+            books_row, text="SHOTCRETE", height=40,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color="#EF6C00", hover_color="#E65100",
+            command=self._on_open_shotcrete_ledger,
+            state="disabled",
+        )
+        self.shotcrete_books_btn.pack(
+            side="left", fill="x", expand=True, padx=(4, 0),
+        )
+
+        # Legacy alias — keeps any code that toggles self.ledger_btn working.
+        self.ledger_btn = self.concrete_books_btn
 
         # ---- FOOTER (status) ----
         footer = ctk.CTkFrame(self.root, corner_radius=0, height=38)
@@ -3326,7 +3352,10 @@ class MainWindow:
     def _set_ledger_enabled(self, enabled: bool):
         if not hasattr(self, "ledger_btn"):
             return
-        self.ledger_btn.configure(state="normal" if enabled else "disabled")
+        state = "normal" if enabled else "disabled"
+        self.ledger_btn.configure(state=state)
+        if hasattr(self, "shotcrete_books_btn"):
+            self.shotcrete_books_btn.configure(state=state)
 
     def _set_results_enabled(self, enabled: bool):
         if not hasattr(self, "results_btn"):
@@ -3379,6 +3408,28 @@ class MainWindow:
                 short = short[:500] + "..."
             messagebox.showerror(
                 "Ledger Error",
+                f"{short}\n\n(Full traceback saved to gemini_debug.log)",
+                parent=self.root,
+            )
+
+    def _on_open_shotcrete_ledger(self):
+        if self._last_cubes_data is None:
+            messagebox.showwarning(
+                "Shotcrete Ledger",
+                "Process a PDF and write the first Excel first, then try again.",
+                parent=self.root,
+            )
+            return
+        try:
+            ShotcreteLedgerPreviewWindow(self.root, self._last_cubes_data)
+        except Exception as e:
+            tb = traceback.format_exc()
+            reader._log(f"--- SHOT-LEDGER ERROR ---\n{tb}")
+            short = str(e)
+            if len(short) > 500:
+                short = short[:500] + "..."
+            messagebox.showerror(
+                "Shotcrete Ledger Error",
                 f"{short}\n\n(Full traceback saved to gemini_debug.log)",
                 parent=self.root,
             )
