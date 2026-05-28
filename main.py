@@ -1740,19 +1740,6 @@ class PreviewWindow:
             # opened later (e.g. the ledger preview) can exclude cards the
             # user unticked here.
             cube["_card_enabled"] = bool(entry["cube_enabled"].get())
-            # Persist the main-preview hide reason so ledger windows can
-            # mirror it (no_match / done / None). Live state, not the
-            # build-time snapshot.
-            if not entry.get("matched_sheet"):
-                cube["_hidden_in_main"] = "no_match"
-            else:
-                _c7 = entry.get("check_7d")
-                _c28 = entry.get("check_28d")
-                _c7_on = _c7.get() if _c7 is not None else False
-                _c28_on = _c28.get() if _c28 is not None else False
-                cube["_hidden_in_main"] = (
-                    "done" if (not _c7_on and not _c28_on) else None
-                )
             if entry.get("shotcrete"):
                 tests_7 = [t for t in cube.get("tests", []) if t.get("age_days") == 7]
                 tests_28 = [t for t in cube.get("tests", []) if t.get("age_days") == 28]
@@ -2896,7 +2883,6 @@ class ShotcreteLedgerPreviewWindow:
                 "weights_ledger":   vals["weights"],
                 "loads_ledger":     vals["loads"],
                 "enabled": BooleanVar(value=reason is None),
-                "hidden_in_main": bool(cube.get("_hidden_in_main")),
             }
             entry["fully_complete"] = _entry_target_cells_all_filled(
                 entry,
@@ -3066,28 +3052,25 @@ class ShotcreteLedgerPreviewWindow:
             font=ctk.CTkFont(size=11),
         ).pack(side="left")
 
-        # Partition entries into actionable vs hidden. Hidden = entries
-        # already complete in the ledger PLUS entries the main preview
-        # already hid (no_match / done). Not-found cubes also share the
-        # toggle so the user sees one count.
+        # Partition entries into actionable vs already-done.
         done_entries = [
             e for e in self.entries
             if not e.get("mismatch") and e.get("fully_complete")
         ]
-        main_hidden = [
-            e for e in self.entries
-            if e.get("hidden_in_main") and e not in done_entries
-        ]
-        hidden_entries = done_entries + main_hidden
-        actionable = [e for e in self.entries if e not in hidden_entries]
-        hidden_total = len(hidden_entries) + len(self.not_found)
+        actionable = [e for e in self.entries if e not in done_entries]
+        hidden_total = len(done_entries) + len(self.not_found)
 
         if hidden_total > 0:
             arrow = "▾" if self._notfound_visible else "▸"
-            label = f"{arrow}  {hidden_total} hidden"
+            parts = []
+            if done_entries:
+                parts.append(f"{len(done_entries)} done")
+            if self.not_found:
+                parts.append(f"{len(self.not_found)} not found")
+            label = f"{arrow}  {hidden_total} hidden ({', '.join(parts)})"
             ctk.CTkButton(
                 legend, text=label,
-                width=160, height=24,
+                width=220, height=24,
                 font=ctk.CTkFont(size=11, weight="bold"),
                 fg_color="#7B1818", hover_color="#5C1010",
                 text_color="#FF8A80",
@@ -3111,14 +3094,6 @@ class ShotcreteLedgerPreviewWindow:
                     font=ctk.CTkFont(size=12, weight="bold"),
                 ).pack(pady=(20, 6))
                 for entry in done_entries:
-                    self._build_card(scroll, entry)
-            if main_hidden:
-                ctk.CTkLabel(
-                    scroll, text="── Hidden in main preview ──",
-                    text_color="gray50",
-                    font=ctk.CTkFont(size=12, weight="bold"),
-                ).pack(pady=(20, 6))
-                for entry in main_hidden:
                     self._build_card(scroll, entry)
             if self.not_found:
                 ctk.CTkLabel(
@@ -3352,14 +3327,7 @@ class ShotcreteLedgerPreviewWindow:
         entry["check_7d"] = c7
         entry["check_28d"] = c28
 
-        # Auto-untick the per-card write checkbox when there's no work
-        # to do here: either both ledger groups are already complete,
-        # or the main preview already hid this cube (no_match / done).
-        # The user can manually re-tick to opt-in to writing.
-        if not bad and (
-            (not c7.get() and not c28.get())
-            or entry.get("hidden_in_main")
-        ):
+        if not bad and not c7.get() and not c28.get():
             entry["enabled"].set(False)
 
     # ---- Arrow-key card navigation (mirrors LedgerPreviewWindow) ----
