@@ -879,28 +879,25 @@ def merge_shotcrete_cubes_for_ledger(cubes_data: dict) -> list[dict]:
       1. Keep ONLY cubes with _shotcrete=True (concrete dropped them).
       2. Do NOT skip tests where _selected is False - all 5 specimens
          per age are forwarded so the ledger receives every result.
-      3. Do NOT skip cubes where _card_enabled is False — for shotcrete
-         the master tick on the first PreviewWindow only controls the
-         per-sheet write. The ledger is the user's only path to record
-         shotcrete data, so it must include those cubes too. The
-         in-window "Write this sample" checkbox here is the real gate.
+      3. Skip cubes where _card_enabled is False (same as concrete):
+         if the user unticked "Write this sample" in the main preview,
+         the cube shouldn't appear here either. The user picks which
+         shotcrete cubes to record by ticking them in the main preview.
     Carry-over: merge multi-set sub-cubes back by (sample_key, cube_no);
     concatenate tests in _set_index order.
 
     Returns a list of {sample_key, sample_id_num, sample_mark, cube_no,
     tests_7d, tests_28d}.
     """
-    # Dedupe by (sample_key, cube_no, set_idx). When the user drag-drops
-    # the same shotcrete page twice in a batch, the cubes show up twice
-    # in cubes_data — once enabled and once with `_card_enabled=False`
-    # (the user typically unticks the dup). Since the ledger pass no
-    # longer filters by _card_enabled, those duplicates would otherwise
-    # concatenate into 10x7d + 10x28d against a 5+5 block. Pick the
-    # enabled copy when both exist.
+    # Dedupe by (sample_key, cube_no, set_idx). Drag-drop duplicates
+    # that are unticked get dropped above; the dedupe still protects
+    # the rare case of two enabled copies of the same page.
     best_by_triple: dict = {}
     triple_order: list = []
     for cube in cubes_data.get("cubes", []):
         if not cube.get("_shotcrete"):
+            continue
+        if cube.get("_card_enabled") is False:
             continue
         key = ledger_sample_key(cube.get("sample_mark"))
         if key is None:
