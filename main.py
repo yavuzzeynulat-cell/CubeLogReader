@@ -1740,19 +1740,21 @@ class PreviewWindow:
             # opened later (e.g. the ledger preview) can exclude cards the
             # user unticked here.
             cube["_card_enabled"] = bool(entry["cube_enabled"].get())
-            # Persist the main-preview hide reason so ledger windows can
-            # mirror it (no_match / done / None). Live state, not the
-            # build-time snapshot.
-            if not entry.get("matched_sheet"):
-                cube["_hidden_in_main"] = "no_match"
-            else:
-                _c7 = entry.get("check_7d")
-                _c28 = entry.get("check_28d")
-                _c7_on = _c7.get() if _c7 is not None else False
-                _c28_on = _c28.get() if _c28 is not None else False
-                cube["_hidden_in_main"] = (
-                    "done" if (not _c7_on and not _c28_on) else None
-                )
+            # Persist a "done" hide marker for ledger windows. We
+            # deliberately DO NOT mirror "no_match" — shotcrete cubes
+            # almost always have no main-Excel sheet (by design), so
+            # propagating that would silently empty the shotcrete
+            # ledger. Each ledger does its own matching.
+            _c7 = entry.get("check_7d")
+            _c28 = entry.get("check_28d")
+            _c7_on = _c7.get() if _c7 is not None else False
+            _c28_on = _c28.get() if _c28 is not None else False
+            cube["_hidden_in_main"] = (
+                "done"
+                if (entry.get("matched_sheet")
+                    and not _c7_on and not _c28_on)
+                else None
+            )
             if entry.get("shotcrete"):
                 tests_7 = [t for t in cube.get("tests", []) if t.get("age_days") == 7]
                 tests_28 = [t for t in cube.get("tests", []) if t.get("age_days") == 28]
