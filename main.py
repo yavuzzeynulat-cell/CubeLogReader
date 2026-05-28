@@ -576,6 +576,25 @@ class PreviewWindow:
                 for c in cubes_data.get("cubes", [])
             ]
 
+        # Card display order: 28d-concrete, 28d-shotcrete, 7d-concrete,
+        # 7d-shotcrete. A cube counts as "28d" if it has any 28-day
+        # test (even if it also has 7-day tests). Python's sort is
+        # stable so PDF-reading order is kept within each group.
+        def _display_order(m):
+            cube = m["cube"]
+            has_28 = any(
+                t.get("age_days") == 28 for t in cube.get("tests", [])
+            )
+            is_shot = bool(cube.get("_shotcrete"))
+            if has_28 and not is_shot:
+                return 0
+            if has_28 and is_shot:
+                return 1
+            if not has_28 and not is_shot:
+                return 2
+            return 3
+        self.matched.sort(key=_display_order)
+
         # UI state: per-cube Entry widget references
         # self.entries[i] = {"weights": [Entry, Entry, Entry], "loads": [...]}
         self.entries: list[dict] = []
@@ -685,7 +704,7 @@ class PreviewWindow:
         ).pack(side="right", padx=(0, 10), pady=12)
 
         self._toggle_img_btn = ctk.CTkButton(
-            top, text="Hide image", width=110,
+            top, text="Show image", width=110,
             command=self._toggle_image_panel,
         )
         self._toggle_img_btn.pack(side="right", padx=(0, 10), pady=12)
@@ -704,10 +723,11 @@ class PreviewWindow:
         body.pack(side="top", fill="both", expand=True, padx=10, pady=10)
 
         # ---- LEFT: image panel ----
+        # Image panel starts HIDDEN — user opens it with the "Show
+        # image" button. Cards take full width by default.
         self._img_panel = ctk.CTkFrame(body, width=720, corner_radius=10)
-        self._img_panel.pack(side="left", fill="y", padx=(0, 10))
         self._img_panel.pack_propagate(False)
-        self._img_visible = True
+        self._img_visible = False
 
         img_toolbar = ctk.CTkFrame(self._img_panel, corner_radius=0, height=40)
         img_toolbar.pack(side="top", fill="x")
@@ -810,6 +830,10 @@ class PreviewWindow:
         # they bubble up to the window binding).
         self.win.bind("<Down>", self._on_card_down)
         self.win.bind("<Up>", self._on_card_up)
+
+        # Image panel starts hidden — cards take full width, so use
+        # the larger card-font size right away.
+        self._apply_card_font_sizes(big=True)
 
     def _compute_hideable_cards(self):
         """Mark cards as hideable based on entry state."""
@@ -1138,6 +1162,10 @@ class PreviewWindow:
         # ---- 7-day / 28-day test rows (pad to 3 each) ----
         tests_7 = [t for t in cube.get("tests", []) if t.get("age_days") == 7]
         tests_28 = [t for t in cube.get("tests", []) if t.get("age_days") == 28]
+        # Remember which ages the notebook actually had — needed for
+        # the "28d cube → default 7d off" auto-tick below, because the
+        # padding right after this hides the difference.
+        has_real_28d = bool(tests_28)
         while len(tests_7) < 3:
             tests_7.append({"weight_gr": None, "load_kn": None})
         while len(tests_28) < 3:
@@ -1249,6 +1277,12 @@ class PreviewWindow:
             excel_w28_empty, excel_l28_empty,
         )
 
+        # When the cube has 28-day tests, default the 7-day group OFF —
+        # by the time the user is processing 28d data the 7d row has
+        # already been written in a previous session.
+        if has_real_28d:
+            c7.set(False)
+
         # If both groups have no work, uncheck the cube master too
         if not c7.get() and not c28.get():
             cube_enabled.set(False)
@@ -1353,6 +1387,9 @@ class PreviewWindow:
         # ---- Rows ----
         tests_7 = [t for t in cube.get("tests", []) if t.get("age_days") == 7]
         tests_28 = [t for t in cube.get("tests", []) if t.get("age_days") == 28]
+        # Remember which ages the notebook actually had — used by the
+        # "28d cube → default 7d off" auto-tick below.
+        has_real_28d = bool(tests_28)
         # Pad to 5 so the UI always shows 5 slots even on partial reads.
         while len(tests_7) < 5:
             tests_7.append({})
@@ -1448,6 +1485,11 @@ class PreviewWindow:
             value=any_excel_28_empty and any_val_28
             and not group_28_has_existing
         )
+        # When the cube has 28-day tests, default the 7-day group OFF
+        # (same rule as normal concrete — 7d row was already written
+        # in a previous session).
+        if has_real_28d:
+            check_7d.set(False)
         cube_enabled.set(
             (sheet is not None) and (check_7d.get() or check_28d.get())
         )
