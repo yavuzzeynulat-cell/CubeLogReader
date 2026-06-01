@@ -60,7 +60,10 @@ COLUMNS (left to right):
 9. Date of Sampling — e.g. 12.03.26
 10. Sampled by — initials
 11. Date of Testing — e.g. 19.03.26 (7-day) or 09.04.26 (28-day)
-12. Age (days) — 7 or 28
+12. Age (days) — read the ACTUAL number written in the Age column.
+    It is usually 7 or 28, but may sometimes be 1, 2, 3 (early-age tests).
+    NEVER round an early-age value up to 7 or 28 — output the real number
+    you see (e.g. a "2" stays age_days=2, not 28).
 13. Weight (gr) — 4-digit integer, e.g. 8360, 8332
 14. Load (kN) — decimal number, e.g. 1102.34, 1196.46
 15. Compressive Strength (N/mm²) — decimal number, e.g. 48.99
@@ -129,6 +132,8 @@ RULES:
 - If you cannot read a value confidently, output null for that field. Do NOT guess.
 - If an age group (7 or 28) has no rows on the page for a cube, just omit
   those rows entirely. Do not emit empty/null rows to pad the group.
+- age_days must be the exact number written in the Age column. Do NOT
+  coerce 1/2/3-day early-age rows into 7 or 28 — keep their real age.
 - Output all cubes found on the page, in top-to-bottom order.
 - Do not add cubes or tests that are not on the page.
 - Output ONLY the JSON object, nothing else.
@@ -505,7 +510,7 @@ def _file_sha256(file_path: str) -> str:
 
 # Bump when the Gemini PROMPT or cube post-processing changes shape;
 # busts stale caches so old reads aren't reused with new logic.
-_PROMPT_VERSION = "v3"
+_PROMPT_VERSION = "v4"
 
 
 def _cache_path_for(digest: str, model_name: str) -> Path:
