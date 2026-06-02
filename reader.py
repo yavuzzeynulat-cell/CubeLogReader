@@ -75,6 +75,15 @@ SHOTCRETE / CORE FORM — occasional special case:
   same form code (e.g. "T/02 - BEJV - MS - MKC - EN - 12390-3"); the
   ONLY reliable difference is "Core" vs "Cube" in the printed title.
 - 5 rows per age instead of 3 (so 10 per set; 20 if two-set).
+- The "Age (days)" column is PREPRINTED as five "7"s then five "28"s per
+  set. Read each row's age from that printed Age column ONLY — never infer
+  age from the Date of Testing. The boundary is easy to misread: the 6th
+  row down is the FIRST 28-day row, NOT a 6th 7-day row. Output at most 5
+  age-7 rows and 5 age-28 rows per set.
+- Each printed row is exactly ONE test object. Never duplicate a row and
+  never split one physical row into two. The count of 7-day rows equals the
+  count of 28-day rows in a set (unless the 28-day block is entirely blank
+  because it has not been tested yet).
 - Column 3 "Mould No" is replaced by TWO columns:
     3a. Core Diameter (mm)  — integer or decimal mm (e.g. 94, 93.5)
     3b. Core Height   (mm)  — integer or decimal mm (e.g. 95, 188)
@@ -398,6 +407,58 @@ def _auto_pick_top3(group: list[dict]) -> None:
         t["_selected"] = i in top3
 
 
+def _shot_sig(t: dict) -> tuple:
+    """Identity triple used to spot duplicate core rows."""
+    return (t.get("weight_gr"), t.get("load_kn"), t.get("strength_nmm2"))
+
+
+def _shot_sig_complete(t: dict) -> bool:
+    return all(v is not None for v in _shot_sig(t))
+
+
+def _dedup_exact_rows(rows: list[dict]) -> list[dict]:
+    """Drop later rows whose (weight, load, strength) triple exactly repeats an
+    earlier row, keeping the first occurrence and preserving order. Real core
+    specimens always vary at least slightly, so an exact triple-match is a
+    Gemini-invented duplicate (sometimes it copies a row into the wrong age).
+    Rows with any missing value are never treated as duplicates (always kept)."""
+    seen: set = set()
+    out: list[dict] = []
+    for t in rows:
+        sig = _shot_sig(t)
+        if _shot_sig_complete(t) and sig in seen:
+            continue
+        seen.add(sig)
+        out.append(t)
+    return out
+
+
+def _rebalance_shotcrete_ages(t7: list[dict], t28: list[dict]) -> tuple:
+    """Fix a single core set whose 7d/28d split is wrong because Gemini misread
+    one age digit (observed: the first 28-day row labelled "7", giving 6+4
+    instead of 5+5 — the row value is correct, only its age label is wrong).
+
+    The Age column is PREPRINTED on the form as 5x"7" then 5x"28", and the user
+    confirmed a set's 7d and 28d counts are always equal (28d is either fully
+    present or fully empty). So when both ages are present and the set is a
+    clean 10 rows, trust POSITION over the misread label: the first 5 rows (in
+    form order, 7d-labelled first) are 7d, the last 5 are 28d. Also rewrites
+    each row's age_days so every downstream consumer agrees.
+
+    Only the clean single-set (total == 10, 28d present) case is rebalanced.
+    Two-set (20) and partial/odd counts are left untouched for the ledger
+    'doesn't fit block' warning to surface."""
+    if not t28 or len(t7) + len(t28) != 10:
+        return t7, t28
+    ordered = t7 + t28
+    new7, new28 = ordered[:5], ordered[5:]
+    for t in new7:
+        t["age_days"] = 7
+    for t in new28:
+        t["age_days"] = 28
+    return new7, new28
+
+
 def _process_shotcrete_cubes(cubes_data: dict) -> dict:
     """
     Mark every cube on a core/shotcrete page as shotcrete and pre-select
@@ -424,6 +485,18 @@ def _process_shotcrete_cubes(cubes_data: dict) -> dict:
         tests = cube.get("tests", [])
         t7 = [t for t in tests if t.get("age_days") == 7]
         t28 = [t for t in tests if t.get("age_days") == 28]
+        other = [t for t in tests if t.get("age_days") not in (7, 28)]
+        # Heal Gemini's two core-form misreads, in order:
+        #   1) a true duplicate row (sometimes copied into the wrong age),
+        #   2) a single misread age digit that unbalances a clean 5+5 set.
+        # Both are no-ops on already-correct data. The 28d-labelled rows are
+        # kept after the 7d ones so form order (7d block then 28d block) is
+        # preserved for the position-based rebalance.
+        ordered = _dedup_exact_rows(t7 + t28)
+        t7 = [t for t in ordered if t.get("age_days") == 7]
+        t28 = [t for t in ordered if t.get("age_days") == 28]
+        t7, t28 = _rebalance_shotcrete_ages(t7, t28)
+        cube["tests"] = t7 + t28 + other
         _auto_pick_top3(t7)
         _auto_pick_top3(t28)
     return cubes_data
@@ -460,10 +533,19 @@ def _split_multi_set_cubes(cubes_data: dict) -> dict:
                 continue
             total = len(set_indices)
             for sidx in set_indices:
+                is_first = sidx == set_indices[0]
+
+                def _in_set(t):
+                    # Rows without a _set_index (e.g. an age group that wasn't
+                    # a clean multiple of 5, so _auto_pick_top3 left it
+                    # unindexed) belong to the first set — never drop them.
+                    idx = t.get("_set_index")
+                    return idx == sidx or (is_first and idx is None)
+
                 sub = {k: v for k, v in cube.items() if k != "tests"}
-                sub_tests = [t for t in tests_7 if t.get("_set_index") == sidx]
-                sub_tests += [t for t in tests_28 if t.get("_set_index") == sidx]
-                if sidx == set_indices[0]:
+                sub_tests = [t for t in tests_7 if _in_set(t)]
+                sub_tests += [t for t in tests_28 if _in_set(t)]
+                if is_first:
                     sub_tests += other
                 sub["tests"] = sub_tests
                 sub["_set_index"] = sidx
@@ -510,7 +592,7 @@ def _file_sha256(file_path: str) -> str:
 
 # Bump when the Gemini PROMPT or cube post-processing changes shape;
 # busts stale caches so old reads aren't reused with new logic.
-_PROMPT_VERSION = "v5"
+_PROMPT_VERSION = "v6"
 
 
 def _cache_path_for(digest: str, model_name: str) -> Path:
