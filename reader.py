@@ -257,6 +257,10 @@ def _call_gemini_on_image(model_chain: list[str], image: Image.Image) -> dict:
                 last_err = e
                 _log(f"  [{model_name}] busy ({type(e).__name__}); falling over to next model")
                 break  # Don't burn retries on a busy model.
+            except gax.NotFound as e:
+                last_err = e
+                _log(f"  [{model_name}] not found ({type(e).__name__}); falling over to next model")
+                break  # Model retired/renamed by Google — skip to next in chain.
             except (gax.DeadlineExceeded, gax.InternalServerError) as e:
                 last_err = e
                 if attempt < 2:
