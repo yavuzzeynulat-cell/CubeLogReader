@@ -573,7 +573,30 @@ def _process_shotcrete_cubes(cubes_data: dict) -> dict:
         cube["tests"] = t7 + t28 + other
         _auto_pick_top3(t7)
         _auto_pick_top3(t28)
+        _index_cube_set_last(cube)
     return cubes_data
+
+
+def _index_cube_set_last(cube: dict) -> None:
+    """Make the appended cube rows the set AFTER the last core set.
+
+    Cards map onto sheets in set order, and the cube rows sit last on the
+    form, so with two core sets the order must be: cores 1, cores 2, cubes.
+    Left unindexed the cubes fall into set 1 and take its second sheet,
+    pushing core set 2 one sheet along.
+
+    With a single core set nothing is indexed and nothing happens — the cubes
+    stay on the same card, which is what the one-list card shows.
+    """
+    tests = cube.get("tests", [])
+    core_sets = [t.get("_set_index") for t in tests
+                 if not is_cube_row(t) and t.get("_set_index") is not None]
+    if not core_sets:
+        return
+    last = max(core_sets) + 1
+    for t in tests:
+        if is_cube_row(t):
+            t["_set_index"] = last
 
 
 def _split_multi_set_cubes(cubes_data: dict) -> dict:

@@ -157,6 +157,68 @@ def test_core_row_without_strength_is_never_selected():
     assert len(_selected(res, 28)) == 3
 
 
+# ---------- two core sets plus a cube set ----------
+# Cards map onto sheets in set order. The cube rows are last on the form, so
+# they are the last set: cores set 1 -> sheet 1, cores set 2 -> sheet 2, cubes
+# -> sheet 3. Without an index of their own the cubes fall into set 1 and take
+# sheet 2, pushing core set 2 onto sheet 3.
+
+TWO_CORE_SETS = ([_core(28, 1550 + i, 230.00 + i, 33.00 + i) for i in range(5)]
+                 + [_core(28, 1570 + i, 250.00 + i, 36.00 + i) for i in range(5)])
+
+
+def test_cubes_become_the_set_after_the_last_core_set():
+    res = _run(TWO_CORE_SETS + REAL_28D_CUBES)
+    idx = {t["strength_nmm2"]: t.get("_set_index")
+           for t in _by_age(res, 28) if reader.is_cube_row(t)}
+    assert set(idx.values()) == {3}, idx
+
+
+def test_core_sets_keep_their_own_indices():
+    res = _run(TWO_CORE_SETS + REAL_28D_CUBES)
+    cores = [t.get("_set_index") for t in _by_age(res, 28)
+             if not reader.is_cube_row(t)]
+    assert cores == [1] * 5 + [2] * 5, cores
+
+
+def test_a_single_core_set_leaves_the_cubes_unindexed():
+    # 1198's shape: one card, one list — the cubes must NOT be split off.
+    res = _run(REAL_7D + REAL_28D_CORES + REAL_28D_CUBES)
+    assert all(t.get("_set_index") is None
+               for t in _by_age(res, 28) if reader.is_cube_row(t))
+
+
+def test_two_core_sets_and_cubes_split_into_three_cards():
+    data = reader._postprocess_cubes({"cubes": [{
+        "_shotcrete_page": True, "cube_no": "109",
+        "sample_mark": "G26-CON-1198",
+        "tests": TWO_CORE_SETS + REAL_28D_CUBES,
+    }]})
+    assert len(data["cubes"]) == 3, len(data["cubes"])
+    assert [c["_set_index"] for c in data["cubes"]] == [1, 2, 3]
+
+
+def test_the_third_card_holds_only_the_cube_rows():
+    data = reader._postprocess_cubes({"cubes": [{
+        "_shotcrete_page": True, "cube_no": "109",
+        "sample_mark": "G26-CON-1198",
+        "tests": TWO_CORE_SETS + REAL_28D_CUBES,
+    }]})
+    third = data["cubes"][2]["tests"]
+    assert len(third) == 3, len(third)
+    assert all(reader.is_cube_row(t) for t in third)
+    assert [t["weight_gr"] for t in third] == [7869, 7789, 7708]
+
+
+def test_a_single_core_set_and_cubes_stay_on_one_card():
+    data = reader._postprocess_cubes({"cubes": [{
+        "_shotcrete_page": True, "cube_no": "109",
+        "sample_mark": "G26-CON-1198",
+        "tests": REAL_7D + REAL_28D_CORES + REAL_28D_CUBES,
+    }]})
+    assert len(data["cubes"]) == 1, len(data["cubes"])
+
+
 # ---------- how many Excel sheets the cube needs ----------
 # An Excel sheet holds 3 specimen slots per age. Cores and cubes are separate
 # sets and never share a sheet, so a mixed block needs a second sheet. The
