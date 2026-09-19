@@ -74,21 +74,34 @@ SHOTCRETE / CORE FORM — occasional special case:
   Strength Test Forms" — note the word "Cube". Both forms share the
   same form code (e.g. "T/02 - BEJV - MS - MKC - EN - 12390-3"); the
   ONLY reliable difference is "Core" vs "Cube" in the printed title.
-- 5 rows per age instead of 3 (so 10 per set; 20 if two-set).
+- The core block holds UP TO 5 rows per age, not always 5. Output exactly
+  as many rows as are actually filled in. If only 4 of the 5 preprinted
+  7-day rows carry readings, output 4 rows — never invent a 5th to round
+  the block out, and never copy a neighbouring row to fill the gap.
+- The 7-day and 28-day counts do NOT have to match. 4 rows at age 7 and 5
+  at age 28 is a normal page. Read each block independently.
 - The "Age (days)" column is PREPRINTED as five "7"s then five "28"s per
   set. Read each row's age from that printed Age column ONLY — never infer
   age from the Date of Testing. The boundary is easy to misread: the 6th
-  row down is the FIRST 28-day row, NOT a 6th 7-day row. Output at most 5
-  age-7 rows and 5 age-28 rows per set.
+  row down is the FIRST 28-day row, NOT a 6th 7-day row.
 - Each printed row is exactly ONE test object. Never duplicate a row and
-  never split one physical row into two. The count of 7-day rows equals the
-  count of 28-day rows in a set (unless the 28-day block is entirely blank
-  because it has not been tested yet).
+  never split one physical row into two.
 - Column 3 "Mould No" is replaced by TWO columns:
     3a. Core Diameter (mm)  — integer or decimal mm (e.g. 94, 93.5)
     3b. Core Height   (mm)  — integer or decimal mm (e.g. 95, 188)
 - All other columns are the same. Extract core_diameter_mm and
   core_height_mm for core-form rows; null for normal-cube rows.
+- NORMAL CUBE ROWS ON A CORE PAGE — read these too:
+  After the core rows of an age block (usually the 28-day one) there may
+  be extra rows for ordinary 150 mm cubes taken from the same sample.
+  You can tell them apart at a glance:
+    * Core Diameter and Core Height cells are BLANK
+    * a mould number is written in the Shotcrete Supplier column instead
+    * the weight is roughly 7000-8500 gr and the load several hundred kN,
+      against roughly 1500 gr and 150-300 kN for a core
+  Output them as ordinary test rows of that age, in the order they appear,
+  with core_diameter_mm and core_height_mm set to null and the mould number
+  in mould_no. Do NOT skip them and do NOT merge them into the core rows.
 - A page is a CORE/shotcrete page ONLY if the printed form TITLE
   contains "Core" (e.g. "Core Record and Core Compressive Strength").
   A normal "Cube" page with extra handwritten rows is NOT a core page
@@ -376,6 +389,45 @@ def _strength_key(test: dict) -> float:
         return float("-inf")
 
 
+def is_cube_row(test: dict) -> bool:
+    """True for a NORMAL CUBE row written into a core/shotcrete form.
+
+    Core rows carry a measured Core Diameter and Core Height; a 150 mm cube
+    needs neither, so those two cells are left blank on the notebook and the
+    mould number is written instead. Blank dimensions are therefore the
+    identifying mark. (Values differ too — ~7800 gr / ~950 kN for a cube
+    against ~1550 gr / ~240 kN for a core — but dimensions are the field the
+    form itself distinguishes them by.)
+    """
+    return (test.get("core_diameter_mm") in (None, "")
+            and test.get("core_height_mm") in (None, ""))
+
+
+def sheets_needed_for_cube(cube: dict) -> int:
+    """How many Excel sheets this cube's results have to be spread across.
+
+    A sheet holds 3 specimen slots per age. On a core page the core rows and
+    any appended cube rows are separate sets that never share a sheet, so an
+    age block holding both needs two sheets.
+
+    writer.scan_sheets_for_cubes needs this up front: the forward scan stops
+    as soon as every cube has been matched, so a cube that quietly needs a
+    second sheet would leave that sheet unscanned and unmatchable.
+    """
+    if not cube.get("_shotcrete"):
+        return 1
+    need = 1
+    for age in (7, 28):
+        rows = [t for t in cube.get("tests", []) if t.get("age_days") == age]
+        groups = 0
+        if any(not is_cube_row(t) for t in rows):
+            groups += 1
+        if any(is_cube_row(t) for t in rows):
+            groups += 1
+        need = max(need, groups)
+    return need
+
+
 def _auto_pick_top3(group: list[dict]) -> None:
     """
     Tag `_selected` on each test in a single age-group:
@@ -390,6 +442,17 @@ def _auto_pick_top3(group: list[dict]) -> None:
     """
     n = len(group)
     if n == 0:
+        return
+    cubes = [t for t in group if is_cube_row(t)]
+    cores = [t for t in group if not is_cube_row(t)]
+    if cubes and cores:
+        # Mixed block (cores + appended cube set). Cubes always out-score
+        # cores (41-43 vs 33-38 N/mm²), so ranking them together hands every
+        # slot to the cubes. Rank the cores among themselves and keep every
+        # cube — the cube set is a set of its own and goes to its own sheet.
+        _auto_pick_top3(cores)
+        for t in cubes:
+            t["_selected"] = _strength_key(t) != float("-inf")
         return
     if n <= 3:
         for t in group:
@@ -449,10 +512,17 @@ def _rebalance_shotcrete_ages(t7: list[dict], t28: list[dict]) -> tuple:
     form order, 7d-labelled first) are 7d, the last 5 are 28d. Also rewrites
     each row's age_days so every downstream consumer agrees.
 
-    Only the clean single-set (total == 10, 28d present) case is rebalanced.
-    Two-set (20) and partial/odd counts are left untouched for the ledger
-    'doesn't fit block' warning to surface."""
-    if not t28 or len(t7) + len(t28) != 10:
+    Only the 6+4 misread signature is rebalanced — that is the shape this
+    heals and nothing else. Earlier this fired on ANY 10-row cube, which
+    corrupted a genuine 4+6 read (7-day block legitimately holds 4 rows when
+    the preprinted 5th is blank) by relabelling a real 28-day core as 7-day.
+    A block holding cube rows is skipped too: the preprinted 5x7/5x28 position
+    rule describes the CORE rows only, so it would relabel a cube as 7-day.
+    Every other count is left untouched for the ledger 'doesn't fit block'
+    warning to surface."""
+    if len(t7) != 6 or len(t28) != 4:
+        return t7, t28
+    if any(is_cube_row(t) for t in t7 + t28):
         return t7, t28
     ordered = t7 + t28
     new7, new28 = ordered[:5], ordered[5:]
@@ -596,7 +666,7 @@ def _file_sha256(file_path: str) -> str:
 
 # Bump when the Gemini PROMPT or cube post-processing changes shape;
 # busts stale caches so old reads aren't reused with new logic.
-_PROMPT_VERSION = "v6"
+_PROMPT_VERSION = "v7"
 
 
 def _cache_path_for(digest: str, model_name: str) -> Path:

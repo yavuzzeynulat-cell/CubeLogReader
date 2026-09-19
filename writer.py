@@ -10,11 +10,14 @@ Target cells (per sheet):
 """
 import re
 import sys
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
 import win32com.client
 from pythoncom import com_error
+
+import reader
 
 # Resolve log path relative to the frozen exe when bundled, else the source file.
 if getattr(sys, "frozen", False):
@@ -119,6 +122,59 @@ def list_open_sheets() -> list[dict]:
     return results
 
 
+def apply_corrected_mark(cubes_data: dict, old_mark, new_text: str) -> int:
+    """Retype a misread Sample Mark. Returns how many cubes were corrected.
+
+    Gemini sometimes misreads the handwritten mark, the cube then matches no
+    sheet, and the temptation is to edit the Sample ID in Excel until it fits
+    the bad read — bending the record to the mistake. This corrects the read
+    instead.
+
+    Cubes are found by NUMBER, not spelling, so "G26-CON-01798" and
+    "G26-CON-1798" are the same sample. A page can hold two sets of one
+    sample, and both carry the same bad mark, so every match is corrected.
+
+    `new_text` may be a full mark ("G26-CON-1198") or just the number
+    ("1198"), in which case the old mark's prefix is kept. Raises ValueError
+    if no number can be read out of it.
+    """
+    new_num = normalize_sample_mark(new_text)
+    if new_num is None:
+        raise ValueError(f"No sample number in {new_text!r}")
+
+    text = str(new_text).strip()
+    if re.fullmatch(r"\d+", text):
+        # Bare number — keep whatever prefix the misread mark carried.
+        prefix = re.sub(r"\d+\s*$", "", str(old_mark or "")).strip()
+        new_mark = f"{prefix}{new_num}" if prefix else str(new_num)
+    else:
+        new_mark = text
+
+    old_num = normalize_sample_mark(old_mark)
+    changed = 0
+    for cube in cubes_data.get("cubes", []):
+        if normalize_sample_mark(cube.get("sample_mark")) != old_num:
+            continue
+        cube["sample_mark"] = new_mark
+        changed += 1
+    return changed
+
+
+def needed_sheet_counts(cubes_data: dict) -> dict:
+    """Sample ID -> how many sheets the scan has to find for it.
+
+    Usually one per cube, but a core page whose age block carries an appended
+    cube set needs two (cores on one sheet, cubes on the next). Cubes with an
+    unreadable sample mark are left out — there is nothing to match them on.
+    """
+    needed: Counter = Counter()
+    for cube in cubes_data.get("cubes", []):
+        num = normalize_sample_mark(cube.get("sample_mark"))
+        if num is not None:
+            needed[num] += reader.sheets_needed_for_cube(cube)
+    return dict(needed)
+
+
 def scan_sheets_for_cubes(
     cubes_data: dict,
     max_forward: int = 25,
@@ -141,14 +197,8 @@ def scan_sheets_for_cubes(
         "found_all":     bool,         # whether every cube matched
       }
     """
-    from collections import Counter
-
-    # What are we looking for? (Sample ID -> count)
-    needed: Counter = Counter()
-    for cube in cubes_data.get("cubes", []):
-        num = normalize_sample_mark(cube.get("sample_mark"))
-        if num is not None:
-            needed[num] += 1
+    # What are we looking for? (Sample ID -> how many sheets)
+    needed: Counter = Counter(needed_sheet_counts(cubes_data))
 
     excel = connect_to_excel()
     active_wb = excel.ActiveWorkbook
@@ -220,21 +270,35 @@ def match_cubes_to_sheets(
     if sheets is None:
         sheets = list_open_sheets()
     used_sheet_keys: set[tuple[str, str]] = set()
+
+    def _claim(num):
+        """First unused sheet carrying this Sample ID, or None."""
+        for s in sheets:
+            if s["sample_id_num"] != num:
+                continue
+            key = (s["workbook"], s["sheet"])
+            if key in used_sheet_keys:
+                continue
+            used_sheet_keys.add(key)
+            return s
+        return None
+
     results: list[dict] = []
     for cube in cubes_data.get("cubes", []):
         num = normalize_sample_mark(cube.get("sample_mark"))
-        match = None
-        if num is not None:
-            for s in sheets:
-                if s["sample_id_num"] != num:
-                    continue
-                key = (s["workbook"], s["sheet"])
-                if key in used_sheet_keys:
-                    continue
-                match = s
-                used_sheet_keys.add(key)
-                break
-        results.append({"cube": cube, "matched_sheet": match})
+        match = _claim(num) if num is not None else None
+        # A core page whose age block carries an appended cube set spills onto
+        # a second sheet. Claim it now so a later cube can't take it. If it
+        # isn't open, leave the list short rather than inventing one.
+        extra: list[dict] = []
+        if match is not None:
+            for _ in range(reader.sheets_needed_for_cube(cube) - 1):
+                nxt = _claim(num)
+                if nxt is None:
+                    break
+                extra.append(nxt)
+        results.append({"cube": cube, "matched_sheet": match,
+                        "extra_sheets": extra})
     return results
 
 

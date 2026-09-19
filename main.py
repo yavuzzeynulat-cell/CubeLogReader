@@ -406,6 +406,45 @@ PILL_NO_COLOR = "#C62828"
 PILL_SHOT_COLOR = "#C62828"   # red — "SHOTCRETE" badge
 SELECTED_BORDER = "#1976D2"   # blue — currently selected card
 DIM_BG = "gray90"             # unused shotcrete row background
+ROW_SEP_COLOR = ("gray82", "gray32")   # hairline between the two age blocks
+SHEET_1_COLOR = "#1976D2"     # blue  — "→ sheet 1" hint
+SHEET_2_COLOR = "#EF6C00"     # amber — "→ sheet 2" hint
+
+# An Excel sheet holds this many specimen slots per age. A shotcrete card can
+# now show more ticked rows than that (core set + appended cube set), and the
+# overflow goes to the next sheet carrying the same Sample ID.
+SLOTS_PER_SHEET = 3
+MAX_SHOT_TICKS = 6            # two sheets' worth
+
+
+def _card_display_order(m: dict) -> int:
+    """Card order: 28d-concrete, 28d-shotcrete, 7d-concrete, 7d-shotcrete.
+
+    A cube counts as "28d" if it has any 28-day test, even alongside 7-day
+    ones. Python's sort is stable, so PDF reading order survives within each
+    group.
+    """
+    cube = m["cube"]
+    has_28 = any(t.get("age_days") == 28 for t in cube.get("tests", []))
+    is_shot = bool(cube.get("_shotcrete"))
+    if has_28 and not is_shot:
+        return 0
+    if has_28 and is_shot:
+        return 1
+    if not has_28 and not is_shot:
+        return 2
+    return 3
+
+
+def _chunk_selected_rows(rows: list, size: int = SLOTS_PER_SHEET) -> list:
+    """Ticked rows, in row order, grouped `size` at a time.
+
+    Chunk 0 goes to the card's matched sheet, chunk 1 to the sheet after it.
+    Row order is form order, so on a mixed core page the cores land in chunk 0
+    and the appended cube set in chunk 1. A short final chunk is kept as-is.
+    """
+    picked = [r for r in rows if r["sel"].get()]
+    return [picked[i:i + size] for i in range(0, len(picked), size)]
 
 
 def _is_none_or_empty(v) -> bool:
@@ -580,20 +619,7 @@ class PreviewWindow:
         # 7d-shotcrete. A cube counts as "28d" if it has any 28-day
         # test (even if it also has 7-day tests). Python's sort is
         # stable so PDF-reading order is kept within each group.
-        def _display_order(m):
-            cube = m["cube"]
-            has_28 = any(
-                t.get("age_days") == 28 for t in cube.get("tests", [])
-            )
-            is_shot = bool(cube.get("_shotcrete"))
-            if has_28 and not is_shot:
-                return 0
-            if has_28 and is_shot:
-                return 1
-            if not has_28 and not is_shot:
-                return 2
-            return 3
-        self.matched.sort(key=_display_order)
+        self.matched.sort(key=_card_display_order)
 
         # UI state: per-cube Entry widget references
         # self.entries[i] = {"weights": [Entry, Entry, Entry], "loads": [...]}
@@ -816,15 +842,7 @@ class PreviewWindow:
         except Exception:
             pass
 
-        for i, m in enumerate(self.matched):
-            self._build_cube_card(self._cube_list, i, m)
-
-        # Hide cards that the user can't / shouldn't act on:
-        # - No matched sheet (the cube has nowhere to go), OR
-        # - Both 7-day and 28-day auto-tick defaulted OFF
-        #   (no work — Excel already has data or no notebook values)
-        self._compute_hideable_cards()
-        self._apply_hidden_visibility()
+        self._populate_cards()
 
         # Arrow-key card navigation (Entry widgets don't use Up/Down so
         # they bubble up to the window binding).
@@ -834,6 +852,164 @@ class PreviewWindow:
         # Image panel starts hidden — cards take full width, so use
         # the larger card-font size right away.
         self._apply_card_font_sizes(big=True)
+
+    # ---------- Correcting a misread Sample Mark ----------
+
+    def _build_title_label(self, header, cube, sheet, title_txt):
+        """Centred card title. On an unmatched card it is double-clickable:
+        Gemini misread the handwritten mark, so retyping it here beats editing
+        the Sample ID in Excel to fit the bad read."""
+        if sheet is not None:
+            lbl = ctk.CTkLabel(header, text=title_txt, font=self._title_font)
+            lbl.grid(row=0, column=1, sticky="")
+            return lbl
+
+        lbl = ctk.CTkLabel(
+            header, text=f"{title_txt}   ✎", font=self._title_font,
+            text_color=PILL_NO_COLOR, cursor="hand2",
+        )
+        lbl.grid(row=0, column=1, sticky="")
+        lbl.bind("<Double-Button-1>",
+                 lambda _e: self._edit_sample_mark(header, lbl, cube))
+        return lbl
+
+    def _edit_sample_mark(self, header, label, cube):
+        """Swap the title for an entry holding the Sample Mark."""
+        old_mark = cube.get("sample_mark")
+        var = StringVar(value="" if old_mark is None else str(old_mark))
+        ent = ctk.CTkEntry(header, textvariable=var, width=240, height=32,
+                           justify="center", font=self._title_font)
+        label.grid_forget()
+        ent.grid(row=0, column=1, sticky="")
+        ent.focus_set()
+        ent.select_range(0, "end")
+
+        done = {"v": False}
+
+        def _restore():
+            if done["v"]:
+                return
+            done["v"] = True
+            try:
+                ent.destroy()
+            except Exception:
+                pass
+            try:
+                label.grid(row=0, column=1, sticky="")
+            except Exception:
+                pass
+
+        def _cancel(_e=None):
+            _restore()
+            return "break"
+
+        def _commit(_e=None):
+            text = var.get()
+            _restore()
+            self._apply_sample_mark_fix(old_mark, text)
+            return "break"
+
+        ent.bind("<Return>", _commit)
+        ent.bind("<Escape>", _cancel)
+        ent.bind("<FocusOut>", _cancel)
+
+    def _merge_scanned_sheets(self, found: list):
+        """Add newly scanned sheets to self.open_sheets, keeping the old ones
+        (a rescan starts from whatever sheet is active now, which may be past
+        sheets the first scan already found)."""
+        seen = {(s["workbook"], s["sheet"]) for s in self.open_sheets}
+        for s in found:
+            key = (s["workbook"], s["sheet"])
+            if key not in seen:
+                seen.add(key)
+                self.open_sheets.append(s)
+
+    def _apply_sample_mark_fix(self, old_mark, new_text):
+        """Retype the mark, find its sheet, and redraw the cards."""
+        old_num = writer.normalize_sample_mark(old_mark)
+        try:
+            new_num = writer.normalize_sample_mark(new_text)
+        except Exception:
+            new_num = None
+        if new_num is None:
+            messagebox.showwarning(
+                "Sample ID", f"No sample number in “{new_text}”.",
+                parent=self.win)
+            return
+        if new_num == old_num:
+            return
+
+        # Keep the user's edits — the cards are about to be rebuilt from
+        # cubes_data, which is where _persist_edits_to_cubes puts them.
+        try:
+            self._persist_edits_to_cubes()
+        except Exception:
+            pass
+
+        try:
+            n = writer.apply_corrected_mark(self.cubes_data, old_mark, new_text)
+        except ValueError as e:
+            messagebox.showwarning("Sample ID", str(e), parent=self.win)
+            return
+        if not n:
+            return
+
+        # Scan Excel only if no already-scanned sheet carries the new ID.
+        if not any(s.get("sample_id_num") == new_num for s in self.open_sheets):
+            try:
+                res = writer.scan_sheets_for_cubes(self.cubes_data)
+                self._merge_scanned_sheets(res.get("sheets", []))
+            except Exception as e:
+                messagebox.showwarning(
+                    "Excel", f"Could not rescan Excel:\n{e}", parent=self.win)
+
+        try:
+            self.matched = writer.match_cubes_to_sheets(
+                self.cubes_data, sheets=self.open_sheets
+            )
+        except Exception as e:
+            self.match_error = str(e)
+            self.matched = [
+                {"cube": c, "matched_sheet": None, "extra_sheets": []}
+                for c in self.cubes_data.get("cubes", [])
+            ]
+        self.matched.sort(key=_card_display_order)
+        self._populate_cards()
+
+        hit = sum(1 for m in self.matched
+                  if writer.normalize_sample_mark(
+                      m["cube"].get("sample_mark")) == new_num
+                  and m["matched_sheet"])
+        if not hit:
+            messagebox.showinfo(
+                "Sample ID",
+                f"No open sheet has Sample ID {new_num}.\n"
+                "Open the workbook (or select a sheet before it) and try again.",
+                parent=self.win)
+
+    def _populate_cards(self):
+        """(Re)draw every card from self.matched.
+
+        Called once at build time, and again after a Sample Mark is corrected —
+        a card that now has a sheet needs its Excel state read and its ticks
+        recomputed, which is exactly what building it does.
+        """
+        for child in self._cube_list.winfo_children():
+            child.destroy()
+        self.entries = []
+        self._cards = []
+        self._selected_idx = None
+        self._hideable_cards = []
+
+        for i, m in enumerate(self.matched):
+            self._build_cube_card(self._cube_list, i, m)
+
+        # Hide cards that the user can't / shouldn't act on:
+        # - No matched sheet (the cube has nowhere to go), OR
+        # - Both 7-day and 28-day auto-tick defaulted OFF
+        #   (no work — Excel already has data or no notebook values)
+        self._compute_hideable_cards()
+        self._apply_hidden_visibility()
 
     def _compute_hideable_cards(self):
         """Mark cards as hideable based on entry state."""
@@ -1120,9 +1296,7 @@ class PreviewWindow:
         set_total = cube.get("_set_total")
         if set_total and set_total > 1:
             title_txt += f"  ·  set {cube.get('_set_index', '?')}/{set_total}"
-        ctk.CTkLabel(
-            header, text=title_txt, font=self._title_font,
-        ).grid(row=0, column=1, sticky="")
+        self._build_title_label(header, cube, sheet, title_txt)
 
         if sheet:
             pill_text = f"[OK]  {sheet['sheet']}"
@@ -1367,9 +1541,7 @@ class PreviewWindow:
         set_total = cube.get("_set_total")
         if set_total and set_total > 1:
             title_txt += f"  ·  set {cube.get('_set_index', '?')}/{set_total}"
-        ctk.CTkLabel(
-            header, text=title_txt, font=self._title_font,
-        ).grid(row=0, column=1, sticky="")
+        self._build_title_label(header, cube, sheet, title_txt)
 
         if sheet:
             pill_text = f"[OK]  {sheet['sheet']}"
@@ -1390,11 +1562,9 @@ class PreviewWindow:
         # Remember which ages the notebook actually had — used by the
         # "28d cube → default 7d off" auto-tick below.
         has_real_28d = bool(tests_28)
-        # Pad to 5 so the UI always shows 5 slots even on partial reads.
-        while len(tests_7) < 5:
-            tests_7.append({})
-        while len(tests_28) < 5:
-            tests_28.append({})
+        # Every row that was read gets a slot — no more, no less. Padding to 5
+        # hid the appended cube rows (the block can run to 8) and dressed a
+        # genuine 4-row block up as 5.
 
         grid = ctk.CTkFrame(card, fg_color="transparent")
         grid.pack(padx=15, pady=(2, 12))
@@ -1411,6 +1581,7 @@ class PreviewWindow:
                      font=self._colhdr_font).grid(row=0, column=5, padx=3)
         ctk.CTkLabel(grid, text="Strength", width=100,
                      font=self._colhdr_font).grid(row=0, column=6, padx=3)
+        ctk.CTkLabel(grid, text="", width=90).grid(row=0, column=7)
 
         # Read Excel state FIRST so the per-row top-3 selection can
         # skip auto-ticking rows when the group is already written
@@ -1446,11 +1617,22 @@ class PreviewWindow:
         )
 
         rows_7d = self._build_shotcrete_group(
-            grid, 1, "7-day", AGE_7_COLOR, tests_7[:5],
+            grid, 1, "7-day", AGE_7_COLOR, tests_7,
             suppress_auto_tick=group_7_done,
         )
+
+        # Hairline between the two age blocks — with variable row counts the
+        # boundary is no longer at a fixed place, so it needs drawing.
+        next_row = 1 + len(tests_7)
+        if tests_7 and tests_28:
+            ctk.CTkFrame(grid, height=1, fg_color=ROW_SEP_COLOR).grid(
+                row=next_row, column=0, columnspan=8,
+                sticky="ew", pady=(10, 10),
+            )
+            next_row += 1
+
         rows_28d = self._build_shotcrete_group(
-            grid, 7, "28-day", AGE_28_COLOR, tests_28[:5],
+            grid, next_row, "28-day", AGE_28_COLOR, tests_28,
             suppress_auto_tick=group_28_done,
         )
 
@@ -1506,6 +1688,9 @@ class PreviewWindow:
         self.entries.append({
             "cube": cube,
             "matched_sheet": sheet,
+            # Sheets past the first that carry this Sample ID. An appended
+            # cube set spills onto extra_sheets[0].
+            "extra_sheets": match.get("extra_sheets") or [],
             "shotcrete": True,
             "cube_enabled": cube_enabled,
             "shot_rows_7d": rows_7d,
@@ -1525,14 +1710,18 @@ class PreviewWindow:
 
     def _build_shotcrete_group(self, grid, start_row, age_label, age_color,
                                 tests, suppress_auto_tick: bool = False):
-        """Build one 5-row shotcrete group. Returns a list of row dicts.
-        When `suppress_auto_tick=True`, no row starts ticked (used when
-        the group's Excel cells are already filled)."""
+        """Build one shotcrete age group — as many rows as were read, which on
+        a mixed core page runs past 5. Returns a list of row dicts. When
+        `suppress_auto_tick=True`, no row starts ticked (used when the group's
+        Excel cells are already filled)."""
+        if not tests:
+            return []
+
         ctk.CTkLabel(
             grid, text=age_label, text_color=age_color,
             font=self._age_font, width=70, anchor="w",
         ).grid(
-            row=start_row, column=0, rowspan=5, sticky="w",
+            row=start_row, column=0, rowspan=len(tests), sticky="w",
             padx=(0, 4), pady=(6, 4),
         )
 
@@ -1543,20 +1732,25 @@ class PreviewWindow:
             except (TypeError, ValueError):
                 return float("-inf")
 
-        # Top 3 indices by strength (uses reader's _selected tag if set,
-        # otherwise computes fresh from the strength values).
-        # Rows with no strength value are never auto-selected.
-        # When suppress_auto_tick is set (the group's Excel cells are
-        # already filled), every row starts unticked.
+        # Pre-ticked rows come from reader's _selected tag; the fallback below
+        # only runs for data that never went through it. Rows with no strength
+        # value are never auto-ticked. When suppress_auto_tick is set (the
+        # group's Excel cells are already filled), every row starts unticked.
         if suppress_auto_tick:
-            top3 = set()
+            preticked = set()
         elif any("_selected" in t for t in tests):
-            top3 = {i for i, t in enumerate(tests) if t.get("_selected")}
+            preticked = {i for i, t in enumerate(tests) if t.get("_selected")}
         else:
-            valid = [i for i in range(len(tests))
-                     if _strength_val(tests[i]) != float("-inf")]
-            ranked = sorted(valid, key=lambda i: _strength_val(tests[i]), reverse=True)
-            top3 = set(ranked[:3])
+            cores = [i for i, t in enumerate(tests) if not reader.is_cube_row(t)]
+            cubes = [i for i, t in enumerate(tests) if reader.is_cube_row(t)]
+            valid = [i for i in cores if _strength_val(tests[i]) != float("-inf")]
+            ranked = sorted(valid, key=lambda i: _strength_val(tests[i]),
+                            reverse=True)
+            preticked = set(ranked[:SLOTS_PER_SHEET])
+            # Cubes are a set of their own and go to their own sheet, so they
+            # never compete with the cores for slots.
+            preticked |= {i for i in cubes
+                          if _strength_val(tests[i]) != float("-inf")}
 
         rows: list[dict] = []
 
@@ -1575,18 +1769,31 @@ class PreviewWindow:
                         fg_color=DIM_BG, text_color=FILLED_TEXT,
                     )
 
+        def _refresh_sheet_hints():
+            """Label each ticked row with the sheet it will be written to."""
+            for n, chunk in enumerate(_chunk_selected_rows(rows)):
+                for r in chunk:
+                    r["hint"].configure(
+                        text=f"→ sheet {n + 1}",
+                        text_color=(SHEET_1_COLOR if n == 0 else SHEET_2_COLOR),
+                    )
+            for r in rows:
+                if not r["sel"].get():
+                    r["hint"].configure(text="")
+
         def _on_toggle(idx):
             on_now = [i for i, r in enumerate(rows) if r["sel"].get()]
-            if rows[idx]["sel"].get() and len(on_now) > 3:
+            if rows[idx]["sel"].get() and len(on_now) > MAX_SHOT_TICKS:
                 others = [i for i in on_now if i != idx]
                 drop = min(others, key=lambda i: _strength_val(tests[i]))
                 rows[drop]["sel"].set(False)
                 _style_row(rows[drop])
             _style_row(rows[idx])
+            _refresh_sheet_hints()
 
         for i, t in enumerate(tests):
             r_idx = start_row + i
-            sel = BooleanVar(value=i in top3)
+            sel = BooleanVar(value=i in preticked)
 
             ctk.CTkCheckBox(
                 grid, text="", variable=sel, width=24,
@@ -1620,6 +1827,10 @@ class PreviewWindow:
             load_ent.grid    (row=r_idx, column=5, padx=5, pady=2)
             strength_ent.grid(row=r_idx, column=6, padx=5, pady=2)
 
+            hint = ctk.CTkLabel(grid, text="", width=90, anchor="w",
+                                font=self._colhdr_font)
+            hint.grid(row=r_idx, column=7, padx=(8, 0), pady=2, sticky="w")
+
             row = {
                 "sel": sel,
                 "diam_var": diam_var, "height_var": height_var,
@@ -1628,10 +1839,12 @@ class PreviewWindow:
                 "diam_ent": diam_ent, "height_ent": height_ent,
                 "weight_ent": weight_ent, "load_ent": load_ent,
                 "strength_ent": strength_ent,
+                "hint": hint,
             }
             rows.append(row)
             _style_row(row)
 
+        _refresh_sheet_hints()
         return rows
 
     # ---------- Card selection & smooth scroll ----------
@@ -1866,9 +2079,16 @@ class PreviewWindow:
             return out
 
         def _parse_shot_rows(rows, label, mark):
-            """Extract (weight, load, diameter, height) for ONLY the 3 selected
-            shotcrete rows in a group. Returns 4 lists of length 3 (None-padded)."""
-            selected = [r for r in rows if r["sel"].get()]
+            """Extract (weight, load, diameter, height) for the ticked rows of
+            one shotcrete age group, a sheet's worth at a time.
+
+            Returns a list of chunks, one per target sheet; each chunk is four
+            lists of length 3 (None-padded). Chunk 0 belongs on the card's
+            matched sheet, chunk 1 on the sheet after it."""
+            return [_parse_shot_chunk(c, label, mark)
+                    for c in _chunk_selected_rows(rows)]
+
+        def _parse_shot_chunk(selected, label, mark):
             w_list, l_list, d_list, h_list = [], [], [], []
 
             def _to_float(var, fname):
@@ -1881,12 +2101,12 @@ class PreviewWindow:
                     all_errors.append(f"{mark}: invalid {label} {fname} '{txt}'")
                     return None
 
-            for r in selected[:3]:
+            for r in selected[:SLOTS_PER_SHEET]:
                 w_list.append(_to_float(r["weight_var"], "weight"))
                 l_list.append(_to_float(r["load_var"], "load"))
                 d_list.append(_to_float(r["diam_var"], "diameter"))
                 h_list.append(_to_float(r["height_var"], "height"))
-            while len(w_list) < 3:
+            while len(w_list) < SLOTS_PER_SHEET:
                 w_list.append(None); l_list.append(None)
                 d_list.append(None); h_list.append(None)
             return w_list, l_list, d_list, h_list
@@ -1906,29 +2126,51 @@ class PreviewWindow:
                 continue
 
             if entry.get("shotcrete"):
-                w7, l7, d7, h7 = _parse_shot_rows(entry["shot_rows_7d"], "7d", mark)
-                w28, l28, d28, h28 = _parse_shot_rows(entry["shot_rows_28d"], "28d", mark)
+                chunks_7 = _parse_shot_rows(entry["shot_rows_7d"], "7d", mark)
+                chunks_28 = _parse_shot_rows(entry["shot_rows_28d"], "28d", mark)
 
                 if not entry["check_7d"].get():
-                    w7 = [None]*3; l7 = [None]*3; d7 = [None]*3; h7 = [None]*3
+                    chunks_7 = []
                 if not entry["check_28d"].get():
-                    w28 = [None]*3; l28 = [None]*3; d28 = [None]*3; h28 = [None]*3
+                    chunks_28 = []
 
-                try:
-                    result = writer.write_cube(
-                        cube,
-                        sheet["workbook"], sheet["sheet"],
-                        weights_7d=w7, loads_7d=l7,
-                        weights_28d=w28, loads_28d=l28,
-                        diameters_7d=d7, heights_7d=h7,
-                        diameters_28d=d28, heights_28d=h28,
-                    )
-                    total_cells += len(result["wrote"])
-                    all_errors.extend(result["errors"])
-                    if result["wrote"]:
-                        written_sheets += 1
-                except Exception as e:
-                    all_errors.append(f"{mark}: write error: {e}")
+                # A sheet holds 3 slots per age, so each chunk is one sheet:
+                # chunk 0 -> matched sheet, chunk 1 -> the next sheet with this
+                # Sample ID (where an appended cube set belongs). The two ages
+                # can need different sheet counts, so size by the longer one.
+                targets = [sheet] + list(entry.get("extra_sheets") or [])
+                blank = [None] * SLOTS_PER_SHEET
+                n_sheets = max(len(chunks_7), len(chunks_28))
+
+                for si in range(n_sheets):
+                    if si >= len(targets):
+                        all_errors.append(
+                            f"{mark}: needs {n_sheets} sheets but only "
+                            f"{len(targets)} with that Sample ID are open — "
+                            f"rows {si * SLOTS_PER_SHEET + 1}+ not written"
+                        )
+                        break
+                    tgt = targets[si]
+                    w7, l7, d7, h7 = (chunks_7[si] if si < len(chunks_7)
+                                      else (blank, blank, blank, blank))
+                    w28, l28, d28, h28 = (chunks_28[si] if si < len(chunks_28)
+                                          else (blank, blank, blank, blank))
+                    try:
+                        result = writer.write_cube(
+                            cube,
+                            tgt["workbook"], tgt["sheet"],
+                            weights_7d=w7, loads_7d=l7,
+                            weights_28d=w28, loads_28d=l28,
+                            diameters_7d=d7, heights_7d=h7,
+                            diameters_28d=d28, heights_28d=h28,
+                        )
+                        total_cells += len(result["wrote"])
+                        all_errors.extend(result["errors"])
+                        if result["wrote"]:
+                            written_sheets += 1
+                    except Exception as e:
+                        all_errors.append(
+                            f"{mark} -> {tgt['sheet']}: write error: {e}")
                 continue
 
             weights_7d = _parse_list(entry["weights_7d"], "7d weight", mark)
