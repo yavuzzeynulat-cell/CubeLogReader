@@ -1,4 +1,9 @@
-"""Quick visual test for LedgerPreviewWindow — no Excel needed."""
+"""Quick visual test for LedgerPreviewWindow — no Excel needed.
+
+Try: the tabs across the top (To write / Done / No match), then on the
+"No match" tab double-click the G26-CON-901 title, type 540 and press Enter.
+The mark is rewritten, the ledger re-read, and the card moves to "To write".
+"""
 import customtkinter as ctk
 import main
 import writer
@@ -53,6 +58,14 @@ def _fake_blocks(ws):
             "start_row": 24250, "end_row": 24256, "size": 7,
             "rows_7d": [24250, 24251, 24252, 24253],
             "rows_28d": [24254, 24255, 24256],
+        },
+        {  # 540 — a block no cube claims, so the "No match" tab has somewhere
+           # to send a corrected mark: double-click G26-CON-901 and type 540.
+            "sample_key": "G26-CON-540", "sample_id_num": 540,
+            "sample_mark_raw": "G26-CON-540", "cube_no": 514, "cube_no_raw": 514,
+            "start_row": 24260, "end_row": 24265, "size": 6,
+            "rows_7d": [24260, 24261, 24262],
+            "rows_28d": [24263, 24264, 24265],
         },
     ]
 

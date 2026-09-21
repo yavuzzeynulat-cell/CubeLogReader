@@ -712,6 +712,86 @@ def clear_gemini_cache() -> int:
     return removed
 
 
+# ---------- Sample Mark corrections the user typed by hand ----------
+#
+# The Gemini read is cached by file digest, so reopening the same notebook
+# replays whatever it first read — including a misread handwritten mark. The
+# corrections the user types on an unmatched card are kept here so they come
+# back with it.
+#
+# Each fix is stored against the mark AS FIRST READ (`_orig_mark`), never
+# against what the cube currently carries: correcting the same cube a second
+# time then replaces one entry instead of leaving a 1798 -> 1198 -> 1200 chain
+# for the next read to walk.
+
+
+def _mark_fix_path() -> Path:
+    return _cache_dir() / "mark_fixes.json"
+
+
+def _load_mark_fix_store() -> dict:
+    p = _mark_fix_path()
+    if not p.exists():
+        return {}
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            store = json.load(f)
+        return store if isinstance(store, dict) else {}
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"[mark-fix] failed to read {p}: {e}", file=sys.stderr)
+        return {}
+
+
+def save_mark_fixes(cubes_data: dict) -> int:
+    """Persist every hand-typed Sample Mark in `cubes_data`.
+
+    Walks the cubes rather than taking one pair, so it is idempotent and
+    covers the several cubes a single correction rewrites. Returns how many
+    fixes are stored for this notebook.
+    """
+    digest = cubes_data.get("_source_digest")
+    if not digest:
+        return 0
+    fixes: dict = {}
+    for cube in cubes_data.get("cubes", []):
+        orig = cube.get("_orig_mark")
+        current = cube.get("sample_mark")
+        if orig is None or current is None or str(orig) == str(current):
+            continue
+        fixes[str(orig)] = str(current)
+
+    store = _load_mark_fix_store()
+    if fixes:
+        store[digest] = fixes
+    else:
+        store.pop(digest, None)
+    try:
+        _cache_dir().mkdir(parents=True, exist_ok=True)
+        with open(_mark_fix_path(), "w", encoding="utf-8") as f:
+            json.dump(store, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        print(f"[mark-fix] failed to write: {e}", file=sys.stderr)
+    return len(fixes)
+
+
+def apply_saved_mark_fixes(cubes_data: dict) -> dict:
+    """Re-apply this notebook's stored corrections to a freshly read dict."""
+    digest = cubes_data.get("_source_digest")
+    if not digest:
+        return cubes_data
+    fixes = _load_mark_fix_store().get(digest) or {}
+    if not fixes:
+        return cubes_data
+    for cube in cubes_data.get("cubes", []):
+        orig = cube.get("_orig_mark", cube.get("sample_mark"))
+        if orig is None:
+            continue
+        new_mark = fixes.get(str(orig))
+        if new_mark is not None:
+            cube["sample_mark"] = new_mark
+    return cubes_data
+
+
 def _fix_known_ocr_misreads(data: dict) -> dict:
     """Normalize cube sample marks that Gemini consistently misreads.
 
@@ -766,12 +846,20 @@ def read_notebook(file_path: str, progress_cb=None) -> dict:
     digest = _file_sha256(file_path)
     cache_file = _cache_path_for(digest, model_name)
 
+    def _finish(data: dict) -> dict:
+        """Stamp the read so hand-typed mark corrections can be keyed to it,
+        then put back the ones already saved for this notebook."""
+        data["_source_digest"] = digest
+        for cube in data.get("cubes", []):
+            cube.setdefault("_orig_mark", cube.get("sample_mark"))
+        return apply_saved_mark_fixes(_postprocess_cubes(data))
+
     if cache_file.exists():
         try:
             with open(cache_file, "r", encoding="utf-8") as f:
                 cached = json.load(f)
             _emit("cache_hit")
-            return _postprocess_cubes(cached)
+            return _finish(cached)
         except (OSError, json.JSONDecodeError) as e:
             print(f"[cache] failed to read {cache_file}: {e}", file=sys.stderr)
 
@@ -826,7 +914,7 @@ def read_notebook(file_path: str, progress_cb=None) -> dict:
     except OSError as e:
         print(f"[cache] failed to write {cache_file}: {e}", file=sys.stderr)
 
-    return _postprocess_cubes(merged)
+    return _finish(merged)
 
 
 if __name__ == "__main__":

@@ -550,7 +550,284 @@ def _collect_ledger_debug(window, mode: str) -> str:
     return "\n".join(lines)
 
 
-class PreviewWindow:
+#: The three groups a card can fall into, in tab order.
+CARD_TABS = (
+    ("todo", "To write"),
+    ("done", "Done"),
+    ("no_match", "No match"),
+)
+TAB_ON_COLOR = "#1F6AA5"
+TAB_OFF_COLOR = "#2B2B2B"
+TAB_NOMATCH_COLOR = "#7B1818"
+
+
+class CardTabs:
+    """Three tabs over one card list: To write / Done / No match.
+
+    This replaces a collapsed "N hidden" section whose cards, once opened,
+    landed back among the matched ones — the card you needed was the hardest
+    one to pick out. Every card is still built once and kept; the tabs only
+    decide which ones are packed, so ticks, edits and the write button all
+    still see the full set.
+
+    The host supplies `self._cards` (the card frames) and a
+    `_card_group(index) -> "todo" | "done" | "no_match"` classifier.
+    """
+
+    def _init_card_tabs(self):
+        self._card_tab = "todo"
+        self._tab_bar = None
+        self._tab_buttons = {}
+        self._card_groups = []
+
+    def _build_card_tabs(self, parent):
+        """The tab strip. Packed by the host above its card area."""
+        self._tab_bar = ctk.CTkFrame(parent, fg_color="transparent")
+        self._tab_buttons = {}
+        for name, label in CARD_TABS:
+            btn = ctk.CTkButton(
+                self._tab_bar, text=label, width=130, height=28,
+                corner_radius=8,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                command=lambda n=name: self._set_card_tab(n),
+            )
+            self._tab_buttons[name] = btn
+        return self._tab_bar
+
+    def _set_card_tab(self, name):
+        self._card_tab = name
+        self._apply_card_tabs()
+
+    def _apply_card_tabs(self):
+        """Recompute each card's group, then show only the active tab.
+
+        An empty tab is not shown at all, and if the active tab empties out
+        (the last unmatched card just got its mark fixed) the view falls back
+        to the first tab that has something in it.
+        """
+        self._card_groups = [self._card_group(i)
+                             for i in range(len(self._cards))]
+        counts = {name: self._card_groups.count(name) for name, _ in CARD_TABS}
+
+        if not counts.get(self._card_tab):
+            for name, _ in CARD_TABS:
+                if counts.get(name):
+                    self._card_tab = name
+                    break
+
+        for card in self._cards:
+            card.pack_forget()
+        for card, group in zip(self._cards, self._card_groups):
+            if group == self._card_tab:
+                card.pack(fill="x", padx=8, pady=8)
+
+        if self._tab_bar is None:
+            return
+        shown = 0
+        for name, label in CARD_TABS:
+            btn = self._tab_buttons.get(name)
+            if btn is None:
+                continue
+            n = counts.get(name, 0)
+            if not n:
+                btn.pack_forget()
+                continue
+            active = name == self._card_tab
+            if name == "no_match":
+                on, off = TAB_NOMATCH_COLOR, TAB_OFF_COLOR
+            else:
+                on, off = TAB_ON_COLOR, TAB_OFF_COLOR
+            btn.configure(
+                text=f"{label}  {n}",
+                fg_color=on if active else off,
+                text_color="white" if active else "gray70",
+                hover_color=on,
+            )
+            btn.pack(side="left", padx=(0, 6))
+            shown += 1
+        # One group only — the strip says nothing the cards don't.
+        if shown <= 1:
+            self._tab_bar.pack_forget()
+
+    def _visible_card_indices(self) -> list:
+        """Indices of the cards on the active tab, in display order. Arrow-key
+        navigation walks these — jumping to a card on another tab would move
+        the selection somewhere the user cannot see."""
+        if len(self._card_groups) != len(self._cards):
+            return list(range(len(self._cards)))
+        return [i for i, g in enumerate(self._card_groups)
+                if g == self._card_tab]
+
+    def _step_card(self, delta: int):
+        """Move the selection `delta` cards along the active tab."""
+        vis = self._visible_card_indices()
+        if not vis:
+            return "break"
+        if self._selected_idx in vis:
+            pos = vis.index(self._selected_idx)
+            pos = max(0, min(pos + delta, len(vis) - 1))
+        else:
+            pos = 0
+        self._select_card(vis[pos])
+        return "break"
+
+    def _card_group(self, index) -> str:
+        """Which tab card `index` belongs to. Implemented per window."""
+        raise NotImplementedError
+
+
+class SampleMarkEditor:
+    """Retyping a Sample Mark that Gemini misread.
+
+    Gemini sometimes misreads the handwritten mark. The cube then matches
+    nothing, and the temptation is to edit the Sample ID in Excel until it
+    fits the bad read — bending the record to the mistake. Instead the user
+    double-clicks the title of the card that found no match and types what
+    the page actually says.
+
+    Shared by PreviewWindow (which matches cubes against Excel cube sheets)
+    and the two ledger windows (which match against ledger blocks). They
+    differ only in what happens after the rewrite, which is `_after_mark_fix`.
+    The rewrite itself is always kept, match or no match: a sample whose
+    sheet lives in a workbook that isn't open still has to reach the ledger.
+    """
+
+    def _bind_mark_editor(self, parent, label, cube, font):
+        """Make `label` open a Sample Mark entry on double-click."""
+        label.configure(cursor="hand2")
+        label.bind(
+            "<Double-Button-1>",
+            lambda _e: self._edit_sample_mark(parent, label, cube, font),
+        )
+        return label
+
+    def _edit_sample_mark(self, parent, label, cube, font):
+        """Swap the title for an entry holding the Sample Mark.
+
+        The entry takes over the label's own grid cell, so this works for a
+        centred preview title and a left-aligned ledger one alike.
+        """
+        place = {k: v for k, v in label.grid_info().items() if k != "in"}
+        old_mark = cube.get("sample_mark")
+        var = StringVar(value="" if old_mark is None else str(old_mark))
+        ent = ctk.CTkEntry(parent, textvariable=var, width=240, height=32,
+                           justify="center", font=font)
+        label.grid_forget()
+        ent.grid(**place)
+        ent.focus_set()
+        ent.select_range(0, "end")
+
+        done = {"v": False}
+
+        def _restore():
+            if done["v"]:
+                return
+            done["v"] = True
+            try:
+                ent.destroy()
+            except Exception:
+                pass
+            try:
+                label.grid(**place)
+            except Exception:
+                pass
+
+        def _cancel(_e=None):
+            _restore()
+            return "break"
+
+        def _commit(_e=None):
+            text = var.get()
+            _restore()
+            self._apply_sample_mark_fix(old_mark, text)
+            return "break"
+
+        ent.bind("<Return>", _commit)
+        ent.bind("<Escape>", _cancel)
+        # Clicking away commits rather than discards — a typed correction is
+        # too easy to lose otherwise, and an unwanted one is just retyped.
+        ent.bind("<FocusOut>", _commit)
+
+    def _apply_sample_mark_fix(self, old_mark, new_text):
+        """Rewrite the mark on every cube sharing it, then hand over to the
+        window for re-matching."""
+        try:
+            new_num = writer.normalize_sample_mark(new_text)
+        except Exception:
+            new_num = None
+        if new_num is None:
+            messagebox.showwarning(
+                "Sample ID", f"No sample number in “{new_text}”.",
+                parent=self.win)
+            return
+
+        try:
+            n = writer.apply_corrected_mark(self.cubes_data, old_mark, new_text)
+        except ValueError as e:
+            messagebox.showwarning("Sample ID", str(e), parent=self.win)
+            return
+        if not n:
+            return
+
+        # Save before re-matching: the correction is the user's, and it has to
+        # survive a re-read whether or not anything is found for it.
+        try:
+            reader.save_mark_fixes(self.cubes_data)
+        except Exception as e:
+            reader._log(f"[mark-fix] could not save: {e}")
+
+        self._after_mark_fix(new_num)
+
+    def _after_mark_fix(self, new_num):
+        """Re-match and redraw. Implemented per window."""
+        raise NotImplementedError
+
+
+class LedgerMarkEditor(SampleMarkEditor):
+    """The `_after_mark_fix` both ledger windows use.
+
+    A ledger match is keyed on the mark including its prefix
+    (writer.ledger_sample_key), so the corrected block is only found by
+    reading the ledger again — which _load_ledger is already written to do,
+    since the file selector switches workbooks the same way.
+    """
+
+    def _after_mark_fix(self, new_num):
+        if not self._load_ledger(self._candidates[self._cand_index]):
+            err = self.ledger_error or "unknown error"
+            self.ledger_error = None
+            messagebox.showwarning(
+                "Ledger", "Could not re-read the ledger:\n" + err,
+                parent=self.win)
+            return
+        self._refresh_view()
+
+        found = any(
+            writer.normalize_sample_mark(e["cube"].get("sample_mark")) == new_num
+            for e in self.entries
+        )
+        if not found:
+            messagebox.showinfo(
+                "Sample ID",
+                f"Still no ledger block for Sample ID {new_num}.\n"
+                "Check the prefix too — the ledger matches G26-CON-1198 and "
+                "G-CON-1198 as different samples. The correction is kept "
+                "either way.",
+                parent=self.win)
+
+    def _build_notfound_title(self, row, cube, title_txt):
+        """Left-aligned title of a not-found mini card, double-clickable so a
+        misread mark can be retyped here instead of only in the preview."""
+        lbl = ctk.CTkLabel(
+            row, text=f"{title_txt}   ✎", font=self._entry_font,
+            text_color="#FF8A80",
+        )
+        lbl.grid(row=0, column=0, sticky="w")
+        self._bind_mark_editor(row, lbl, cube, self._entry_font)
+        return lbl
+
+
+class PreviewWindow(CardTabs, SampleMarkEditor):
     """Shows the extracted data, lets the user edit and write to Excel."""
 
     def __init__(
@@ -631,9 +908,7 @@ class PreviewWindow:
         self._scroll_anim_id: str | None = None
 
         # Hidden-cards toggle (no-match + nothing-to-write cubes).
-        self._hidden_visible = False
-        self._hideable_cards: list[tuple] = []  # (card_widget, reason)
-        self._hidden_toggle_btn = None
+        self._init_card_tabs()
 
         self._build_ui()
         self.win.protocol("WM_DELETE_WINDOW", self._close)
@@ -706,16 +981,6 @@ class PreviewWindow:
             text_color="gray55",
             font=ctk.CTkFont(size=11),
         ).pack(side="left")
-
-        # Hidden-cards toggle — populated after cards are built.
-        self._hidden_toggle_btn = ctk.CTkButton(
-            legend, text="",
-            width=210, height=24,
-            font=ctk.CTkFont(size=11, weight="bold"),
-            fg_color="#7B1818", hover_color="#5C1010",
-            text_color="#FF8A80",
-            command=self._toggle_hidden,
-        )
 
         if self.match_error:
             ctk.CTkLabel(
@@ -833,8 +1098,12 @@ class PreviewWindow:
         self.win.after(80, self._zoom_fit)
 
         # ---- RIGHT: scrollable cube list ----
-        self._cube_list = ctk.CTkScrollableFrame(body, corner_radius=10)
-        self._cube_list.pack(side="right", fill="both", expand=True)
+        right = ctk.CTkFrame(body, fg_color="transparent")
+        right.pack(side="right", fill="both", expand=True)
+        self._build_card_tabs(right).pack(fill="x", pady=(0, 6))
+
+        self._cube_list = ctk.CTkScrollableFrame(right, corner_radius=10)
+        self._cube_list.pack(fill="both", expand=True)
 
         # Faster wheel scrolling
         try:
@@ -866,52 +1135,43 @@ class PreviewWindow:
 
         lbl = ctk.CTkLabel(
             header, text=f"{title_txt}   ✎", font=self._title_font,
-            text_color=PILL_NO_COLOR, cursor="hand2",
+            text_color=PILL_NO_COLOR,
         )
         lbl.grid(row=0, column=1, sticky="")
-        lbl.bind("<Double-Button-1>",
-                 lambda _e: self._edit_sample_mark(header, lbl, cube))
+        self._bind_mark_editor(header, lbl, cube, self._title_font)
         return lbl
 
-    def _edit_sample_mark(self, header, label, cube):
-        """Swap the title for an entry holding the Sample Mark."""
-        old_mark = cube.get("sample_mark")
-        var = StringVar(value="" if old_mark is None else str(old_mark))
-        ent = ctk.CTkEntry(header, textvariable=var, width=240, height=32,
-                           justify="center", font=self._title_font)
-        label.grid_forget()
-        ent.grid(row=0, column=1, sticky="")
-        ent.focus_set()
-        ent.select_range(0, "end")
+    def _build_status_pill(self, header, cube, sheet):
+        """Right-hand [OK]/[NO MATCH] pill. An unmatched card also gets a
+        "Search again" button: the first scan only walks the active workbook,
+        so a sample living in another file matches nothing until that file is
+        open — and then there has to be a way to look again without touching
+        the mark."""
+        box = ctk.CTkFrame(header, fg_color="transparent")
+        box.grid(row=0, column=2, sticky="e")
 
-        done = {"v": False}
+        if sheet:
+            pill_text = f"[OK]  {sheet['sheet']}"
+            pill_color = PILL_OK_COLOR
+        else:
+            pill_text = "[NO MATCH]"
+            pill_color = PILL_NO_COLOR
+        ctk.CTkLabel(
+            box, text=pill_text,
+            fg_color=pill_color, text_color="white",
+            corner_radius=14, font=self._pill_font,
+            padx=10, pady=3,
+        ).pack(side="right")
 
-        def _restore():
-            if done["v"]:
-                return
-            done["v"] = True
-            try:
-                ent.destroy()
-            except Exception:
-                pass
-            try:
-                label.grid(row=0, column=1, sticky="")
-            except Exception:
-                pass
-
-        def _cancel(_e=None):
-            _restore()
-            return "break"
-
-        def _commit(_e=None):
-            text = var.get()
-            _restore()
-            self._apply_sample_mark_fix(old_mark, text)
-            return "break"
-
-        ent.bind("<Return>", _commit)
-        ent.bind("<Escape>", _cancel)
-        ent.bind("<FocusOut>", _cancel)
+        if sheet is None:
+            num = writer.normalize_sample_mark(cube.get("sample_mark"))
+            ctk.CTkButton(
+                box, text="Search again", width=96, height=24,
+                font=self._pill_font,
+                command=lambda n=num: self._rescan_and_rematch(
+                    n, force_scan=True),
+            ).pack(side="right", padx=(0, 8))
+        return box
 
     def _merge_scanned_sheets(self, found: list):
         """Add newly scanned sheets to self.open_sheets, keeping the old ones
@@ -924,21 +1184,19 @@ class PreviewWindow:
                 seen.add(key)
                 self.open_sheets.append(s)
 
-    def _apply_sample_mark_fix(self, old_mark, new_text):
-        """Retype the mark, find its sheet, and redraw the cards."""
-        old_num = writer.normalize_sample_mark(old_mark)
-        try:
-            new_num = writer.normalize_sample_mark(new_text)
-        except Exception:
-            new_num = None
-        if new_num is None:
-            messagebox.showwarning(
-                "Sample ID", f"No sample number in “{new_text}”.",
-                parent=self.win)
-            return
-        if new_num == old_num:
-            return
+    def _after_mark_fix(self, new_num):
+        """Retyping the SAME number is not a no-op: the first attempt may have
+        failed only because the workbook holding that sheet wasn't open yet.
+        Force the scan so a second try after opening it actually looks."""
+        self._rescan_and_rematch(new_num, force_scan=True)
 
+    def _rescan_and_rematch(self, expect_num=None, force_scan=False):
+        """Re-scan Excel, re-match every cube, and redraw the cards.
+
+        `expect_num` is the Sample ID the caller is hoping to find; when it is
+        already among the scanned sheets the COM scan is skipped unless
+        `force_scan` asks for it (the user pressing "Search again" always
+        means look now — they have just opened another workbook)."""
         # Keep the user's edits — the cards are about to be rebuilt from
         # cubes_data, which is where _persist_edits_to_cubes puts them.
         try:
@@ -946,16 +1204,9 @@ class PreviewWindow:
         except Exception:
             pass
 
-        try:
-            n = writer.apply_corrected_mark(self.cubes_data, old_mark, new_text)
-        except ValueError as e:
-            messagebox.showwarning("Sample ID", str(e), parent=self.win)
-            return
-        if not n:
-            return
-
-        # Scan Excel only if no already-scanned sheet carries the new ID.
-        if not any(s.get("sample_id_num") == new_num for s in self.open_sheets):
+        known = any(s.get("sample_id_num") == expect_num
+                    for s in self.open_sheets)
+        if force_scan or not known:
             try:
                 res = writer.scan_sheets_for_cubes(self.cubes_data)
                 self._merge_scanned_sheets(res.get("sheets", []))
@@ -976,15 +1227,19 @@ class PreviewWindow:
         self.matched.sort(key=_card_display_order)
         self._populate_cards()
 
+        if expect_num is None:
+            return
         hit = sum(1 for m in self.matched
                   if writer.normalize_sample_mark(
-                      m["cube"].get("sample_mark")) == new_num
+                      m["cube"].get("sample_mark")) == expect_num
                   and m["matched_sheet"])
         if not hit:
             messagebox.showinfo(
                 "Sample ID",
-                f"No open sheet has Sample ID {new_num}.\n"
-                "Open the workbook (or select a sheet before it) and try again.",
+                f"No open sheet has Sample ID {expect_num}.\n"
+                "Open that workbook (or select a sheet before it) and press "
+                "“Search again”. The corrected mark is kept either way — the "
+                "sample can still be written to the ledger.",
                 parent=self.win)
 
     def _populate_cards(self):
@@ -999,63 +1254,25 @@ class PreviewWindow:
         self.entries = []
         self._cards = []
         self._selected_idx = None
-        self._hideable_cards = []
 
         for i, m in enumerate(self.matched):
             self._build_cube_card(self._cube_list, i, m)
 
-        # Hide cards that the user can't / shouldn't act on:
-        # - No matched sheet (the cube has nowhere to go), OR
-        # - Both 7-day and 28-day auto-tick defaulted OFF
-        #   (no work — Excel already has data or no notebook values)
-        self._compute_hideable_cards()
-        self._apply_hidden_visibility()
+        self._apply_card_tabs()
 
-    def _compute_hideable_cards(self):
-        """Mark cards as hideable based on entry state."""
-        self._hideable_cards = []
-        for i, entry in enumerate(self.entries):
-            if i >= len(self._cards):
-                continue
-            card = self._cards[i]
-            if not entry.get("matched_sheet"):
-                self._hideable_cards.append((card, "no_match"))
-                continue
-            c7 = entry.get("check_7d")
-            c28 = entry.get("check_28d")
-            c7_on = c7.get() if c7 is not None else False
-            c28_on = c28.get() if c28 is not None else False
-            if not c7_on and not c28_on:
-                self._hideable_cards.append((card, "done"))
-
-    def _apply_hidden_visibility(self):
-        """Pack or pack_forget the hideable cards, and update the toggle
-        button's text + visibility."""
-        if not self._hideable_cards:
-            if self._hidden_toggle_btn is not None:
-                self._hidden_toggle_btn.pack_forget()
-            return
-        for card, _ in self._hideable_cards:
-            if self._hidden_visible:
-                card.pack(fill="x", padx=8, pady=8)
-            else:
-                card.pack_forget()
-        no_match = sum(1 for _, r in self._hideable_cards if r == "no_match")
-        done = sum(1 for _, r in self._hideable_cards if r == "done")
-        arrow = "▾" if self._hidden_visible else "▸"
-        parts = []
-        if done:
-            parts.append(f"{done} done")
-        if no_match:
-            parts.append(f"{no_match} no match")
-        label = f"{arrow}  {len(self._hideable_cards)} hidden ({', '.join(parts)})"
-        if self._hidden_toggle_btn is not None:
-            self._hidden_toggle_btn.configure(text=label)
-            self._hidden_toggle_btn.pack(side="left", padx=(12, 0))
-
-    def _toggle_hidden(self):
-        self._hidden_visible = not self._hidden_visible
-        self._apply_hidden_visibility()
+    def _card_group(self, index) -> str:
+        """No sheet to write to → "No match". Nothing left to write (Excel
+        already holds the values, or the notebook had none) → "Done"."""
+        if index >= len(self.entries):
+            return "todo"
+        entry = self.entries[index]
+        if not entry.get("matched_sheet"):
+            return "no_match"
+        c7 = entry.get("check_7d")
+        c28 = entry.get("check_28d")
+        c7_on = c7.get() if c7 is not None else False
+        c28_on = c28.get() if c28 is not None else False
+        return "todo" if (c7_on or c28_on) else "done"
 
     # ---------- Zoom & image canvas helpers ----------
 
@@ -1298,18 +1515,7 @@ class PreviewWindow:
             title_txt += f"  ·  set {cube.get('_set_index', '?')}/{set_total}"
         self._build_title_label(header, cube, sheet, title_txt)
 
-        if sheet:
-            pill_text = f"[OK]  {sheet['sheet']}"
-            pill_color = PILL_OK_COLOR
-        else:
-            pill_text = "[NO MATCH]"
-            pill_color = PILL_NO_COLOR
-        ctk.CTkLabel(
-            header, text=pill_text,
-            fg_color=pill_color, text_color="white",
-            corner_radius=14, font=self._pill_font,
-            padx=10, pady=3,
-        ).grid(row=0, column=2, sticky="e")
+        self._build_status_pill(header, cube, sheet)
 
         # ---- Read Excel state (empty vs filled) for all 6 cells ----
         excel_w7_empty = [True, True, True]
@@ -1543,18 +1749,7 @@ class PreviewWindow:
             title_txt += f"  ·  set {cube.get('_set_index', '?')}/{set_total}"
         self._build_title_label(header, cube, sheet, title_txt)
 
-        if sheet:
-            pill_text = f"[OK]  {sheet['sheet']}"
-            pill_color = PILL_OK_COLOR
-        else:
-            pill_text = "[NO MATCH]"
-            pill_color = PILL_NO_COLOR
-        ctk.CTkLabel(
-            header, text=pill_text,
-            fg_color=pill_color, text_color="white",
-            corner_radius=14, font=self._pill_font,
-            padx=10, pady=3,
-        ).grid(row=0, column=2, sticky="e")
+        self._build_status_pill(header, cube, sheet)
 
         # ---- Rows ----
         tests_7 = [t for t in cube.get("tests", []) if t.get("age_days") == 7]
@@ -1850,22 +2045,10 @@ class PreviewWindow:
     # ---------- Card selection & smooth scroll ----------
 
     def _on_card_down(self, _event=None):
-        if not self._cards:
-            return "break"
-        if self._selected_idx is None:
-            self._select_card(0)
-        else:
-            self._select_card(min(self._selected_idx + 1, len(self._cards) - 1))
-        return "break"
+        return self._step_card(1)
 
     def _on_card_up(self, _event=None):
-        if not self._cards:
-            return "break"
-        if self._selected_idx is None:
-            self._select_card(0)
-        else:
-            self._select_card(max(self._selected_idx - 1, 0))
-        return "break"
+        return self._step_card(-1)
 
     def _select_card(self, idx: int):
         if idx < 0 or idx >= len(self._cards):
@@ -2229,7 +2412,7 @@ class PreviewWindow:
 
 # ---------- Ledger Preview Window ----------
 
-class LedgerPreviewWindow:
+class LedgerPreviewWindow(CardTabs, LedgerMarkEditor):
     """
     Second-pass preview for the downward-growing ledger Excel ("Concrete"
     sheet). Consumes the same in-memory cubes_data used by the first
@@ -2293,7 +2476,7 @@ class LedgerPreviewWindow:
         self._ledger_menu = None
         self._body = None
         self._title_label = None
-        self._notfound_visible = False  # hidden by default; toggle button
+        self._init_card_tabs()
         try:
             self._candidates = writer.find_ledger_candidates()
         except Exception as e:
@@ -2482,27 +2665,29 @@ class LedgerPreviewWindow:
         bar.pack(side="top", fill="x", padx=22, pady=(6, 0))
         if not self._candidates:
             return
+        # Always a dropdown, even for a single file. The list is what tells
+        # the user which workbooks were recognised at all — a plain label for
+        # one file reads as "there is no choice here" when the real problem
+        # is that the other open workbooks weren't detected.
         sel_font = ctk.CTkFont(family="Segoe UI", size=11)
-        if len(self._candidates) == 1:
-            ctk.CTkLabel(
-                bar, text=f"Yazılacak dosya: {self._cand_labels[0]}",
-                font=sel_font, text_color="gray55",
-            ).pack(side="left")
-        else:
-            ctk.CTkLabel(
-                bar, text="Ledger dosyası:",
-                font=sel_font, text_color="gray55",
-            ).pack(side="left", padx=(0, 6))
-            self._ledger_menu = ctk.CTkOptionMenu(
-                bar, values=self._cand_labels,
-                command=self._on_select_ledger,
-                font=sel_font, height=24, width=280,
-                fg_color="gray25", button_color="gray30",
-                button_hover_color="gray35", text_color="gray80",
-                dropdown_font=sel_font,
-            )
-            self._ledger_menu.set(self._cand_labels[self._cand_index])
-            self._ledger_menu.pack(side="left")
+        ctk.CTkLabel(
+            bar, text="Ledger dosyası:",
+            font=sel_font, text_color="gray55",
+        ).pack(side="left", padx=(0, 6))
+        self._ledger_menu = ctk.CTkOptionMenu(
+            bar, values=self._cand_labels,
+            command=self._on_select_ledger,
+            font=sel_font, height=24, width=280,
+            fg_color="gray25", button_color="gray30",
+            button_hover_color="gray35", text_color="gray80",
+            dropdown_font=sel_font,
+        )
+        self._ledger_menu.set(self._cand_labels[self._cand_index])
+        self._ledger_menu.pack(side="left")
+        ctk.CTkLabel(
+            bar, text=f"({len(self._candidates)} dosya bulundu)",
+            font=sel_font, text_color="gray45",
+        ).pack(side="left", padx=(8, 0))
 
     def _on_select_ledger(self, choice: str):
         """Dropdown handler: switch to another open ledger workbook."""
@@ -2536,16 +2721,6 @@ class LedgerPreviewWindow:
             self._title_label.configure(text=self._compute_title())
         writable = any(e["mismatch"] is None for e in self.entries)
         self.write_btn.configure(state="normal" if writable else "disabled")
-        if self._body is not None:
-            try:
-                self._body.destroy()
-            except Exception:
-                pass
-        self._build_body()
-
-    def _toggle_notfound(self):
-        """Show/hide the 'not found' details banner."""
-        self._notfound_visible = not self._notfound_visible
         if self._body is not None:
             try:
                 self._body.destroy()
@@ -2590,56 +2765,32 @@ class LedgerPreviewWindow:
             if not e.get("mismatch") and e.get("fully_complete")
         ]
         actionable = [e for e in self.entries if e not in done_entries]
-        hidden_total = len(done_entries) + len(self.not_found)
+        self._build_card_tabs(body).pack(fill="x", pady=(0, 6))
 
-        if hidden_total > 0:
-            arrow = "▾" if self._notfound_visible else "▸"
-            parts = []
-            if done_entries:
-                parts.append(f"{len(done_entries)} done")
-            if self.not_found:
-                parts.append(f"{len(self.not_found)} not found")
-            label = f"{arrow}  {hidden_total} hidden ({', '.join(parts)})"
-            ctk.CTkButton(
-                legend, text=label,
-                width=220, height=24,
-                font=ctk.CTkFont(size=11, weight="bold"),
-                fg_color="#7B1818", hover_color="#5C1010",
-                text_color="#FF8A80",
-                command=self._toggle_notfound,
-            ).pack(side="right")
-
-        # Scrollable card area
         scroll = ctk.CTkScrollableFrame(body, fg_color="transparent")
         scroll.pack(fill="both", expand=True)
         self._cube_list = scroll
 
-        # Main cards: actionable + mismatch
+        # Every card is built once and kept; the tabs only decide which are
+        # packed, so the write button still sees the ticks on all of them.
+        # Done entries get FULL interactive cards (input fields, per-group
+        # checkboxes) so the user can still force a write if they want.
+        # Not-found stays a mini info card — there is no block to write to,
+        # only a misread mark to retype.
+        self._cards = []
+        self._card_kinds = []
+        self._selected_idx = None
         for entry in actionable:
             self._build_card(scroll, entry)
+            self._card_kinds.append("todo")
+        for entry in done_entries:
+            self._build_card(scroll, entry)
+            self._card_kinds.append("done")
+        for cube in self.not_found:
+            self._build_notfound_card(scroll, cube)
+            self._card_kinds.append("no_match")
 
-        # Hidden group: done + not-found, only when toggle is on.
-        # Done entries get FULL interactive cards (input fields,
-        # per-group checkboxes) so the user can still force a write
-        # if needed. Not-found stays as mini info cards (no block to
-        # write to anyway).
-        if self._notfound_visible:
-            if done_entries:
-                ctk.CTkLabel(
-                    scroll, text="── Already filled in ledger ──",
-                    text_color="gray50",
-                    font=ctk.CTkFont(size=12, weight="bold"),
-                ).pack(pady=(20, 6))
-                for entry in done_entries:
-                    self._build_card(scroll, entry)
-            if self.not_found:
-                ctk.CTkLabel(
-                    scroll, text="── Not found in ledger ──",
-                    text_color="#FF8A80",
-                    font=ctk.CTkFont(size=12, weight="bold"),
-                ).pack(pady=(20, 6))
-                for cube in self.not_found:
-                    self._build_notfound_card(scroll, cube)
+        self._apply_card_tabs()
 
         # Arrow-key navigation between cards
         self.win.bind("<Down>", self._on_card_down)
@@ -2653,12 +2804,19 @@ class LedgerPreviewWindow:
                 font=self._entry_font,
             ).pack(pady=20)
 
+    def _card_group(self, index) -> str:
+        """Ledger cards are built tab by tab, so the group is just the kind
+        recorded alongside the card."""
+        kinds = getattr(self, "_card_kinds", [])
+        return kinds[index] if index < len(kinds) else "todo"
+
     def _build_notfound_card(self, parent, cube):
         card = ctk.CTkFrame(
             parent, corner_radius=10, border_width=1,
             border_color="#7B1818", fg_color="#2a1010",
         )
         card.pack(fill="x", padx=8, pady=4)
+        self._cards.append(card)
         row = ctk.CTkFrame(card, fg_color="transparent")
         row.pack(fill="x", padx=15, pady=8)
         row.grid_columnconfigure(0, weight=1)
@@ -2667,9 +2825,7 @@ class LedgerPreviewWindow:
             f"Cube No {cube.get('cube_no', '?')}  ·  "
             f"{cube.get('sample_mark', '?')}"
         )
-        ctk.CTkLabel(
-            row, text=title, font=self._entry_font, text_color="#FF8A80",
-        ).grid(row=0, column=0, sticky="w")
+        self._build_notfound_title(row, cube, title)
         ctk.CTkLabel(
             row, text="[NOT FOUND]", font=self._pill_font,
             text_color="white", fg_color=PILL_NO_COLOR,
@@ -2847,24 +3003,10 @@ class LedgerPreviewWindow:
             entry["enabled"].set(False)
 
     def _on_card_down(self, _event=None):
-        if not self._cards:
-            return "break"
-        if self._selected_idx is None:
-            self._select_card(0)
-        else:
-            self._select_card(
-                min(self._selected_idx + 1, len(self._cards) - 1)
-            )
-        return "break"
+        return self._step_card(1)
 
     def _on_card_up(self, _event=None):
-        if not self._cards:
-            return "break"
-        if self._selected_idx is None:
-            self._select_card(0)
-        else:
-            self._select_card(max(self._selected_idx - 1, 0))
-        return "break"
+        return self._step_card(-1)
 
     def _select_card(self, idx: int):
         if idx < 0 or idx >= len(self._cards):
@@ -3001,7 +3143,7 @@ class LedgerPreviewWindow:
 
 # ---------- Shotcrete Ledger Preview Window ----------
 
-class ShotcreteLedgerPreviewWindow:
+class ShotcreteLedgerPreviewWindow(CardTabs, LedgerMarkEditor):
     """
     Books Excel write pass for SHOTCRETE cubes. Sibling of
     LedgerPreviewWindow targeting a separate workbook (sheet
@@ -3064,7 +3206,7 @@ class ShotcreteLedgerPreviewWindow:
         self._ledger_menu = None
         self._body = None
         self._title_label = None
-        self._notfound_visible = False  # hidden by default; toggle button
+        self._init_card_tabs()
         try:
             self._candidates = writer.find_shotcrete_ledger_candidates()
         except Exception as e:
@@ -3241,27 +3383,29 @@ class ShotcreteLedgerPreviewWindow:
         bar.pack(side="top", fill="x", padx=22, pady=(6, 0))
         if not self._candidates:
             return
+        # Always a dropdown, even for a single file. The list is what tells
+        # the user which workbooks were recognised at all — a plain label for
+        # one file reads as "there is no choice here" when the real problem
+        # is that the other open workbooks weren't detected.
         sel_font = ctk.CTkFont(family="Segoe UI", size=11)
-        if len(self._candidates) == 1:
-            ctk.CTkLabel(
-                bar, text=f"Yazılacak dosya: {self._cand_labels[0]}",
-                font=sel_font, text_color="gray55",
-            ).pack(side="left")
-        else:
-            ctk.CTkLabel(
-                bar, text="Shotcrete ledger dosyası:",
-                font=sel_font, text_color="gray55",
-            ).pack(side="left", padx=(0, 6))
-            self._ledger_menu = ctk.CTkOptionMenu(
-                bar, values=self._cand_labels,
-                command=self._on_select_ledger,
-                font=sel_font, height=24, width=280,
-                fg_color="gray25", button_color="gray30",
-                button_hover_color="gray35", text_color="gray80",
-                dropdown_font=sel_font,
-            )
-            self._ledger_menu.set(self._cand_labels[self._cand_index])
-            self._ledger_menu.pack(side="left")
+        ctk.CTkLabel(
+            bar, text="Shotcrete ledger dosyası:",
+            font=sel_font, text_color="gray55",
+        ).pack(side="left", padx=(0, 6))
+        self._ledger_menu = ctk.CTkOptionMenu(
+            bar, values=self._cand_labels,
+            command=self._on_select_ledger,
+            font=sel_font, height=24, width=280,
+            fg_color="gray25", button_color="gray30",
+            button_hover_color="gray35", text_color="gray80",
+            dropdown_font=sel_font,
+        )
+        self._ledger_menu.set(self._cand_labels[self._cand_index])
+        self._ledger_menu.pack(side="left")
+        ctk.CTkLabel(
+            bar, text=f"({len(self._candidates)} dosya bulundu)",
+            font=sel_font, text_color="gray45",
+        ).pack(side="left", padx=(8, 0))
 
     def _on_select_ledger(self, choice: str):
         try:
@@ -3291,16 +3435,6 @@ class ShotcreteLedgerPreviewWindow:
             self._title_label.configure(text=self._compute_title())
         writable = any(e["mismatch"] is None for e in self.entries)
         self.write_btn.configure(state="normal" if writable else "disabled")
-        if self._body is not None:
-            try:
-                self._body.destroy()
-            except Exception:
-                pass
-        self._build_body()
-
-    def _toggle_notfound(self):
-        """Show/hide the 'not found' details banner."""
-        self._notfound_visible = not self._notfound_visible
         if self._body is not None:
             try:
                 self._body.destroy()
@@ -3342,51 +3476,32 @@ class ShotcreteLedgerPreviewWindow:
             if not e.get("mismatch") and e.get("fully_complete")
         ]
         actionable = [e for e in self.entries if e not in done_entries]
-        hidden_total = len(done_entries) + len(self.not_found)
-
-        if hidden_total > 0:
-            arrow = "▾" if self._notfound_visible else "▸"
-            parts = []
-            if done_entries:
-                parts.append(f"{len(done_entries)} done")
-            if self.not_found:
-                parts.append(f"{len(self.not_found)} not found")
-            label = f"{arrow}  {hidden_total} hidden ({', '.join(parts)})"
-            ctk.CTkButton(
-                legend, text=label,
-                width=220, height=24,
-                font=ctk.CTkFont(size=11, weight="bold"),
-                fg_color="#7B1818", hover_color="#5C1010",
-                text_color="#FF8A80",
-                command=self._toggle_notfound,
-            ).pack(side="right")
+        self._build_card_tabs(body).pack(fill="x", pady=(0, 6))
 
         scroll = ctk.CTkScrollableFrame(body, fg_color="transparent")
         scroll.pack(fill="both", expand=True)
         self._cube_list = scroll
 
+        # Every card is built once and kept; the tabs only decide which are
+        # packed, so the write button still sees the ticks on all of them.
+        # Done entries get FULL interactive cards (input fields, per-group
+        # checkboxes) so the user can still force a write if they want.
+        # Not-found stays a mini info card — there is no block to write to,
+        # only a misread mark to retype.
+        self._cards = []
+        self._card_kinds = []
+        self._selected_idx = None
         for entry in actionable:
             self._build_card(scroll, entry)
+            self._card_kinds.append("todo")
+        for entry in done_entries:
+            self._build_card(scroll, entry)
+            self._card_kinds.append("done")
+        for cube in self.not_found:
+            self._build_notfound_card(scroll, cube)
+            self._card_kinds.append("no_match")
 
-        # Done entries get FULL interactive cards (so the user can edit/
-        # force-write if they want). Not-found stays as mini info cards.
-        if self._notfound_visible:
-            if done_entries:
-                ctk.CTkLabel(
-                    scroll, text="── Already filled in ledger ──",
-                    text_color="gray50",
-                    font=ctk.CTkFont(size=12, weight="bold"),
-                ).pack(pady=(20, 6))
-                for entry in done_entries:
-                    self._build_card(scroll, entry)
-            if self.not_found:
-                ctk.CTkLabel(
-                    scroll, text="── Not found in ledger ──",
-                    text_color="#FF8A80",
-                    font=ctk.CTkFont(size=12, weight="bold"),
-                ).pack(pady=(20, 6))
-                for cube in self.not_found:
-                    self._build_notfound_card(scroll, cube)
+        self._apply_card_tabs()
 
         self.win.bind("<Down>", self._on_card_down)
         self.win.bind("<Up>", self._on_card_up)
@@ -3399,12 +3514,19 @@ class ShotcreteLedgerPreviewWindow:
                 font=self._entry_font,
             ).pack(pady=20)
 
+    def _card_group(self, index) -> str:
+        """Ledger cards are built tab by tab, so the group is just the kind
+        recorded alongside the card."""
+        kinds = getattr(self, "_card_kinds", [])
+        return kinds[index] if index < len(kinds) else "todo"
+
     def _build_notfound_card(self, parent, cube):
         card = ctk.CTkFrame(
             parent, corner_radius=10, border_width=1,
             border_color="#7B1818", fg_color="#2a1010",
         )
         card.pack(fill="x", padx=8, pady=4)
+        self._cards.append(card)
         row = ctk.CTkFrame(card, fg_color="transparent")
         row.pack(fill="x", padx=15, pady=8)
         row.grid_columnconfigure(0, weight=1)
@@ -3413,9 +3535,7 @@ class ShotcreteLedgerPreviewWindow:
             f"Core No {cube.get('cube_no', '?')}  ·  "
             f"{cube.get('sample_mark', '?')}"
         )
-        ctk.CTkLabel(
-            row, text=title, font=self._entry_font, text_color="#FF8A80",
-        ).grid(row=0, column=0, sticky="w")
+        self._build_notfound_title(row, cube, title)
         ctk.CTkLabel(
             row, text="[NOT FOUND]", font=self._pill_font,
             text_color="white", fg_color=PILL_NO_COLOR,
@@ -3617,24 +3737,10 @@ class ShotcreteLedgerPreviewWindow:
     # ---- Arrow-key card navigation (mirrors LedgerPreviewWindow) ----
 
     def _on_card_down(self, _event=None):
-        if not self._cards:
-            return "break"
-        if self._selected_idx is None:
-            self._select_card(0)
-        else:
-            self._select_card(
-                min(self._selected_idx + 1, len(self._cards) - 1)
-            )
-        return "break"
+        return self._step_card(1)
 
     def _on_card_up(self, _event=None):
-        if not self._cards:
-            return "break"
-        if self._selected_idx is None:
-            self._select_card(0)
-        else:
-            self._select_card(max(self._selected_idx - 1, 0))
-        return "break"
+        return self._step_card(-1)
 
     def _select_card(self, idx: int):
         if idx < 0 or idx >= len(self._cards):
