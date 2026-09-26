@@ -497,7 +497,10 @@ def write_cube_28day(
 # =====================================================================
 
 LEDGER_SHEET_NAME = "Concrete"
-LEDGER_MAX_SCAN_ROWS = 30000  # hard cap; real end is UsedRange
+# Hard cap; the real end is UsedRange. Only guards against a sheet formatted
+# down to row 1M. The 2026 Concrete ledger passed 30000 rows in September and
+# every sample below the old 30000 cap came back "not found".
+LEDGER_MAX_SCAN_ROWS = 200000
 
 
 def _is_empty(v) -> bool:
